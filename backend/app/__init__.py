@@ -1,0 +1,2 @@
+"""Local FoodSeg annotation backend."""
+
