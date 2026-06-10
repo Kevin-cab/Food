@@ -200,15 +200,6 @@ small {
   margin-top: 2px;
 }
 
-.export-folder-images {
-  display: grid;
-  gap: 4px;
-  max-height: 180px;
-  overflow-y: auto;
-  padding-right: 2px;
-}
-
-.export-image-row,
 .split-folder {
   display: flex;
   gap: 8px;
@@ -221,7 +212,6 @@ small {
   background: #fff;
 }
 
-.export-image-row span,
 .split-folder span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -229,7 +219,6 @@ small {
   min-width: 0;
 }
 
-.export-image-row small,
 .split-folder small {
   flex: 0 0 auto;
 }

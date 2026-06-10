@@ -2841,14 +2841,6 @@ function App() {
                       </small>
                     </div>
                   )}
-                  <div className="export-folder-images">
-                    {folder.annotatedImages.map((image) => (
-                      <div key={image.id} className="export-image-row">
-                        <span>{image.file_name}</span>
-                        <small>{image.width}x{image.height}</small>
-                      </div>
-                    ))}
-                  </div>
                 </div>
               ))}
             </section>
