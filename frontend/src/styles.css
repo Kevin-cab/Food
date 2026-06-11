@@ -76,6 +76,11 @@ select {
   flex-basis: 360px;
   width: 360px;
   border-left: 1px solid #d8ddd1;
+  scrollbar-width: none;
+}
+
+.right::-webkit-scrollbar {
+  display: none;
 }
 
 .center {
@@ -141,10 +146,22 @@ small {
 }
 
 .tabs {
+  position: sticky;
+  top: 0;
+  z-index: 5;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
-  margin-bottom: 12px;
+  margin: -12px -12px 12px;
+  padding: 12px;
+  border-bottom: 1px solid #d8ddd1;
+  background: #f6f7f2;
+}
+
+.tabs button {
+  min-width: 0;
+  height: 42px;
+  white-space: nowrap;
 }
 
 .tool {
@@ -153,8 +170,10 @@ small {
 }
 
 .prompt {
-  width:max-content;
-  flex: 1 1 180px;
+  width: auto;
+  flex: 0 1 260px;
+  min-width: 140px;
+  max-width: 320px;
 }
 
 .export-controls {
