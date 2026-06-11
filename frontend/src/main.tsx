@@ -181,6 +181,7 @@ function App() {
   const editMaskDataRef = useRef<string | null>(null);
   const panStartRef = useRef<Point | null>(null);
   const loadingReviewCandidateIdsRef = useRef<Set<number>>(new Set());
+  const imageListDirtyRef = useRef<Set<number>>(new Set());
   const selectedJobRef = useRef<number | null>(null);
   const suppressReviewRenameBlurRef = useRef(false);
 
@@ -301,7 +302,12 @@ function App() {
 
   useEffect(() => {
     if (!currentImage) return;
+    const previousImageId = activeImageIdRef.current;
     activeImageIdRef.current = currentImage.id;
+    if (previousImageId !== null && previousImageId !== currentImage.id && imageListDirtyRef.current.has(previousImageId)) {
+      imageListDirtyRef.current.delete(previousImageId);
+      window.setTimeout(() => void refreshFilteredImageList(currentImage.id), 0);
+    }
     renderSeqRef.current += 1;
     annotationMaskSeqRef.current += 1;
     selectedMaskSeqRef.current += 1;
@@ -444,6 +450,7 @@ function App() {
 
   useEffect(() => {
     if (!project) return;
+    imageListDirtyRef.current.clear();
     void loadImagePage(0, true);
   }, [project, imageFilterKey]);
 
@@ -526,6 +533,7 @@ function App() {
     setPan({ x: 0, y: 0 });
     activeImageIdRef.current = null;
     loadingReviewCandidateIdsRef.current.clear();
+    imageListDirtyRef.current.clear();
     clearOverlayCanvas();
     clearMaskCanvas();
   }
@@ -623,7 +631,11 @@ function App() {
   }
 
   async function refreshAfterAnnotationMutation(imageId: number, focusImageId?: number | null) {
-    if (activeImageIdRef.current === imageId) await refreshAnnotations(imageId);
+    if (activeImageIdRef.current === imageId) {
+      await refreshAnnotations(imageId);
+      imageListDirtyRef.current.add(imageId);
+      return;
+    }
     await refreshFilteredImageList(focusImageId);
   }
 
