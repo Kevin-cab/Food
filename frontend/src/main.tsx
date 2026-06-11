@@ -594,6 +594,41 @@ function App() {
     }
   }
 
+  async function refreshFilteredImageList(focusImageId?: number | null) {
+    if (!project) return;
+    const previousCurrentId = currentImage?.id ?? null;
+    const targetCount = Math.max(IMAGE_PAGE_SIZE, images.length, currentIndex + 1);
+    const nextImages: ImageRecord[] = [];
+    let offset = 0;
+    let total = 0;
+    let hasMore = false;
+
+    while (nextImages.length < targetCount) {
+      const limit = Math.min(IMAGE_PAGE_SIZE, targetCount - nextImages.length);
+      const page = await api.listImages({ ...imageListParams(offset), limit });
+      if (offset === 0) total = page.total;
+      hasMore = page.has_more;
+      nextImages.push(...page.items);
+      if (!page.has_more || page.items.length === 0) break;
+      offset += page.items.length;
+    }
+
+    setImageTotal(total);
+    setImageHasMore(hasMore);
+    setImages(nextImages);
+    setCurrentIndex((previousIndex) => {
+      const desiredId = focusImageId ?? previousCurrentId;
+      const desiredIndex = desiredId == null ? -1 : nextImages.findIndex((image) => image.id === desiredId);
+      if (desiredIndex >= 0) return desiredIndex;
+      return Math.min(previousIndex, Math.max(0, nextImages.length - 1));
+    });
+  }
+
+  async function refreshAfterAnnotationMutation(imageId: number, focusImageId?: number | null) {
+    if (activeImageIdRef.current === imageId) await refreshAnnotations(imageId);
+    await refreshFilteredImageList(focusImageId);
+  }
+
   async function refreshIndexStatus() {
     try {
       const status = await api.projectIndexStatus();
@@ -880,11 +915,12 @@ function App() {
 
   async function acceptSelectedCandidate() {
     if (!selectedCandidateObj || !currentImage) return;
+    const imageId = currentImage.id;
     const acceptedCandidate = selectedCandidateObj;
     const previousCandidates = candidates;
     const previousSelectedCandidate = selectedCandidate;
     const previousSelectedAnnotation = selectedAnnotation;
-    const created = await api.createAnnotation(currentImage.id, selectedCandidateObj.name || activeClassName, selectedCandidateObj.mask_png, "accepted");
+    const created = await api.createAnnotation(imageId, selectedCandidateObj.name || activeClassName, selectedCandidateObj.mask_png, "accepted");
     let activeAnnotationId = created.id;
     if (selectedCandidateObj.reviewCandidateId) {
       await api.linkAcceptedReviewCandidate(selectedCandidateObj.reviewCandidateId, created.id);
@@ -895,7 +931,7 @@ function App() {
     setAnnotations((items) => [...items.filter((item) => item.id !== created.id), { ...created, visible: true }]);
     setCandidates((items) => items.filter((item) => item.localId !== selectedCandidateObj.localId));
     setSelectedCandidate(null);
-    await refreshAnnotations(currentImage.id);
+    await refreshAfterAnnotationMutation(imageId);
     recordEditorAction({
       label: "accept selected candidate",
       undo: async () => {
@@ -907,10 +943,10 @@ function App() {
         setCandidates(previousCandidates);
         setSelectedCandidate(previousSelectedCandidate);
         setSelectedAnnotation(previousSelectedAnnotation);
-        if (currentImage) await refreshAnnotations(currentImage.id);
+        await refreshAfterAnnotationMutation(imageId, imageId);
       },
       redo: async () => {
-        const redone = await api.createAnnotation(currentImage.id, acceptedCandidate.name || activeClassName, acceptedCandidate.mask_png, "accepted", acceptedCandidate.score);
+        const redone = await api.createAnnotation(imageId, acceptedCandidate.name || activeClassName, acceptedCandidate.mask_png, "accepted", acceptedCandidate.score);
         activeAnnotationId = redone.id;
         if (acceptedCandidate.reviewCandidateId) {
           await api.linkAcceptedReviewCandidate(acceptedCandidate.reviewCandidateId, redone.id);
@@ -920,7 +956,7 @@ function App() {
         setSelectedCandidate(null);
         setSelectedAnnotation(redone.id);
         setAnnotationMasks((previous) => ({ ...previous, [redone.id]: acceptedCandidate.mask_png }));
-        if (currentImage) await refreshAnnotations(currentImage.id);
+        await refreshAfterAnnotationMutation(imageId);
       }
     });
     setStatus(`Saved candidate ${candidateIndex(selectedCandidateObj)} as object #${created.id}.`);
@@ -928,13 +964,14 @@ function App() {
 
   async function acceptAllCandidates() {
     if (!currentImage || candidates.length === 0) return;
+    const imageId = currentImage.id;
     const acceptedCandidates = candidates;
     const previousSelectedCandidate = selectedCandidate;
     const createdAnnotations: AnnotationRecord[] = [];
     const createdMasks: Record<number, string> = {};
     let activeAnnotationIds: number[] = [];
     for (const candidate of acceptedCandidates) {
-      const created = await api.createAnnotation(currentImage.id, candidate.name || activeClassName, candidate.mask_png, "accepted", candidate.score);
+      const created = await api.createAnnotation(imageId, candidate.name || activeClassName, candidate.mask_png, "accepted", candidate.score);
       if (candidate.reviewCandidateId) {
         await api.linkAcceptedReviewCandidate(candidate.reviewCandidateId, created.id);
       }
@@ -946,7 +983,7 @@ function App() {
     setAnnotations((items) => [...items, ...createdAnnotations]);
     setAnnotationMasks((previous) => ({ ...previous, ...createdMasks }));
     clearCandidates(true);
-    await refreshAnnotations(currentImage.id);
+    await refreshAfterAnnotationMutation(imageId);
     recordEditorAction({
       label: "accept all candidates",
       undo: async () => {
@@ -959,14 +996,14 @@ function App() {
         }
         setCandidates(acceptedCandidates);
         setSelectedCandidate(previousSelectedCandidate);
-        if (currentImage) await refreshAnnotations(currentImage.id);
+        await refreshAfterAnnotationMutation(imageId, imageId);
       },
       redo: async () => {
         const nextIds: number[] = [];
         const nextAnnotations: AnnotationRecord[] = [];
         const nextMasks: Record<number, string> = {};
         for (const candidate of acceptedCandidates) {
-          const created = await api.createAnnotation(currentImage.id, candidate.name || activeClassName, candidate.mask_png, "accepted", candidate.score);
+          const created = await api.createAnnotation(imageId, candidate.name || activeClassName, candidate.mask_png, "accepted", candidate.score);
           if (candidate.reviewCandidateId) await api.linkAcceptedReviewCandidate(candidate.reviewCandidateId, created.id);
           nextIds.push(created.id);
           nextAnnotations.push({ ...created, visible: true });
@@ -978,7 +1015,7 @@ function App() {
         setAnnotationMasks((previous) => ({ ...previous, ...nextMasks }));
         setCandidates([]);
         setSelectedCandidate(null);
-        if (currentImage) await refreshAnnotations(currentImage.id);
+        await refreshAfterAnnotationMutation(imageId);
       }
     });
     setStatus("Saved all candidate masks as objects.");
@@ -986,18 +1023,19 @@ function App() {
 
   async function rejectPending(id: number) {
     const previous = annotations.find((annotation) => annotation.id === id);
+    const imageId = previous?.image_id ?? currentImage?.id;
     await api.updateAnnotation(id, { status: "rejected" });
-    if (currentImage) await refreshAnnotations(currentImage.id);
+    if (imageId) await refreshAfterAnnotationMutation(imageId);
     if (previous) {
       recordEditorAction({
         label: `reject object #${id}`,
         undo: async () => {
           await api.updateAnnotation(id, { status: previous.status as "accepted" | "pending" | "rejected" });
-          if (currentImage) await refreshAnnotations(currentImage.id);
+          if (imageId) await refreshAfterAnnotationMutation(imageId, imageId);
         },
         redo: async () => {
           await api.updateAnnotation(id, { status: "rejected" });
-          if (currentImage) await refreshAnnotations(currentImage.id);
+          if (imageId) await refreshAfterAnnotationMutation(imageId);
         }
       });
     }
@@ -1005,18 +1043,19 @@ function App() {
 
   async function acceptPending(id: number) {
     const previous = annotations.find((annotation) => annotation.id === id);
+    const imageId = previous?.image_id ?? currentImage?.id;
     await api.updateAnnotation(id, { status: "accepted" });
-    if (currentImage) await refreshAnnotations(currentImage.id);
+    if (imageId) await refreshAfterAnnotationMutation(imageId);
     if (previous) {
       recordEditorAction({
         label: `accept object #${id}`,
         undo: async () => {
           await api.updateAnnotation(id, { status: previous.status as "accepted" | "pending" | "rejected" });
-          if (currentImage) await refreshAnnotations(currentImage.id);
+          if (imageId) await refreshAfterAnnotationMutation(imageId, imageId);
         },
         redo: async () => {
           await api.updateAnnotation(id, { status: "accepted" });
-          if (currentImage) await refreshAnnotations(currentImage.id);
+          if (imageId) await refreshAfterAnnotationMutation(imageId);
         }
       });
     }
@@ -1034,7 +1073,7 @@ function App() {
       }
     }
     await deleteAnnotationLocal(id);
-    if (currentImage) await refreshAnnotations(currentImage.id);
+    if (removed?.image_id) await refreshAfterAnnotationMutation(removed.image_id, removed.image_id);
     if (removed && removedMask) {
       let activeAnnotationId: number | null = null;
       recordEditorAction({
@@ -1046,14 +1085,14 @@ function App() {
           if (restored.visible) setAnnotationMasks((previous) => ({ ...previous, [restored.id]: removedMask }));
           setSelectedAnnotation(restored.id);
           setSelectedCandidate(null);
-          if (currentImage) await refreshAnnotations(currentImage.id);
+          await refreshAfterAnnotationMutation(removed.image_id, removed.image_id);
         },
         redo: async () => {
           if (activeAnnotationId) {
             await deleteAnnotationLocal(activeAnnotationId);
             activeAnnotationId = null;
           }
-          if (currentImage) await refreshAnnotations(currentImage.id);
+          await refreshAfterAnnotationMutation(removed.image_id);
         }
       });
     }
@@ -1138,7 +1177,8 @@ function App() {
 
   async function combineSavedObjectMasks() {
     if (!currentImage) return;
-    const combinable = annotations.filter((annotation) => annotation.image_id === currentImage.id && annotation.status === "accepted");
+    const imageId = currentImage.id;
+    const combinable = annotations.filter((annotation) => annotation.image_id === imageId && annotation.status === "accepted");
     if (combinable.length < 2) {
       setStatus("Need at least two saved objects to combine.");
       return;
@@ -1160,7 +1200,7 @@ function App() {
         setStatus("Could not combine saved object masks.");
         return;
       }
-      const created = await api.createAnnotation(currentImage.id, label, combinedMask, "accepted");
+      const created = await api.createAnnotation(imageId, label, combinedMask, "accepted");
       await Promise.all(combinable.map((annotation) => deleteAnnotationLocal(annotation.id)));
       setSelectedAnnotation(created.id);
       setSelectedCandidate(null);
@@ -1169,7 +1209,7 @@ function App() {
         combinable.forEach((annotation) => delete next[annotation.id]);
         return next;
       });
-      await refreshAnnotations(currentImage.id);
+      await refreshAfterAnnotationMutation(imageId, imageId);
       let activeCombinedId: number | null = created.id;
       let activeRestoredIds: number[] = [];
       recordEditorAction({
@@ -1191,16 +1231,16 @@ function App() {
             return next;
           });
           setSelectedAnnotation(restored[0]?.id ?? null);
-          if (currentImage) await refreshAnnotations(currentImage.id);
+          await refreshAfterAnnotationMutation(imageId, imageId);
         },
         redo: async () => {
-          const redone = await api.createAnnotation(currentImage.id, label, combinedMask, "accepted");
+          const redone = await api.createAnnotation(imageId, label, combinedMask, "accepted");
           activeCombinedId = redone.id;
           await Promise.all(activeRestoredIds.map((id) => deleteAnnotationLocal(id).catch(() => undefined)));
           activeRestoredIds = [];
           setSelectedAnnotation(redone.id);
           setAnnotationMasks((previous) => ({ ...previous, [redone.id]: combinedMask }));
-          if (currentImage) await refreshAnnotations(currentImage.id);
+          await refreshAfterAnnotationMutation(imageId, imageId);
         }
       });
       setStatus(`Combined ${combinable.length} saved objects into object #${created.id}.`);
@@ -1218,7 +1258,7 @@ function App() {
     const name = value.trim() || "food";
     setAnnotations((items) => items.map((item) => (item.id === annotation.id ? { ...item, category_name: name } : item)));
     await api.updateAnnotation(annotation.id, { category_name: name });
-    if (currentImage) await refreshAnnotations(currentImage.id);
+    await refreshAfterAnnotationMutation(annotation.image_id);
     setStatus(`Renamed object #${annotation.id} to ${name}.`);
   }
 
@@ -1277,6 +1317,7 @@ function App() {
         setEditMaskData(null);
       }
       if (currentImage) await refreshAnnotations(currentImage.id);
+      await refreshFilteredImageList();
       await refreshReviewCandidates(selectedJobId);
       setStatus(`Accepted ${accepted.accepted} pending review candidates from Job #${selectedJobId}.`);
     } catch (error) {
@@ -1522,7 +1563,7 @@ function App() {
     setReviewCandidates((items) => items.filter((item) => item.id !== candidateId));
     setCandidates((items) => items.filter((item) => item.reviewCandidateId !== candidateId));
     if (selectedCandidateObj?.reviewCandidateId === candidateId) setSelectedCandidate(null);
-    if (currentImage) await refreshAnnotations(currentImage.id);
+    await refreshAfterAnnotationMutation(accepted.image.id);
     if (openedCandidate && accepted.annotation_id) {
       let activeAnnotationId = accepted.annotation_id;
       recordEditorAction({
@@ -1533,7 +1574,7 @@ function App() {
           setReviewCandidates((items) => items.some((item) => item.id === reopened.id) ? items : [reopened, ...items]);
           setCandidates((items) => items.some((item) => item.reviewCandidateId === candidateId) ? items : [openedCandidate, ...items]);
           setSelectedCandidate(openedCandidate.localId);
-          if (currentImage) await refreshAnnotations(currentImage.id);
+          await refreshAfterAnnotationMutation(accepted.image.id, accepted.image.id);
         },
         redo: async () => {
           const redone = await api.acceptReviewCandidate(candidateId);
@@ -1541,7 +1582,7 @@ function App() {
           setReviewCandidates((items) => items.filter((item) => item.id !== candidateId));
           setCandidates((items) => items.filter((item) => item.reviewCandidateId !== candidateId));
           setSelectedCandidate(null);
-          if (currentImage) await refreshAnnotations(currentImage.id);
+          await refreshAfterAnnotationMutation(accepted.image.id);
         }
       });
     }
