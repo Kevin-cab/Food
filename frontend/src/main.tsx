@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  Box,
   Brush,
   Check,
   ChevronLeft,
@@ -10,8 +9,6 @@ import {
   Eye,
   EyeOff,
   Hand,
-  Maximize2,
-  MousePointer2,
   Plus,
   Redo2,
   Search,
@@ -20,8 +17,6 @@ import {
   Type,
   Undo2,
   Wand2,
-  ZoomIn,
-  ZoomOut,
   X
 } from "lucide-react";
 import { annotationMaskUrl, api, imageUrl } from "./api";
@@ -94,11 +89,9 @@ const TOOL_ITEMS: Array<{ id: ToolMode; label: string; icon: React.ReactNode }> 
   { id: "view", label: "View / pan", icon: <Hand size={17} /> },
   { id: "point_pos", label: "Positive point", icon: <Plus size={17} /> },
   { id: "point_neg", label: "Negative point", icon: <X size={17} /> },
-  { id: "box", label: "Box prompt", icon: <Box size={17} /> },
   { id: "text", label: "Text prompt", icon: <Type size={17} /> },
   { id: "brush", label: "Brush add mask pixels", icon: <Brush size={17} /> },
-  { id: "erase", label: "Erase mask pixels", icon: <X size={17} /> },
-  { id: "polygon", label: "Manual polygon", icon: <MousePointer2 size={17} /> }
+  { id: "erase", label: "Erase mask pixels", icon: <X size={17} /> }
 ];
 
 function App() {
@@ -358,6 +351,11 @@ function App() {
         event.preventDefault();
         setTool("erase");
         setStatus("Erase brush tool selected.");
+        return;
+      }
+      if (key === "g" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        void runTextPrompt();
         return;
       }
       if (key === "d" && !event.ctrlKey && !event.metaKey && !event.altKey) {
@@ -2366,15 +2364,6 @@ function App() {
           <button onClick={redoUniversal} title="Redo" disabled={!canRedo}>
             <Redo2 size={18} />
           </button>
-          <button onClick={() => zoomAt(zoom / 1.2)} title="Zoom out">
-            <ZoomOut size={18} />
-          </button>
-          <button onClick={() => resetViewport()} title="Fit image">
-            <Maximize2 size={18} />
-          </button>
-          <button onClick={() => zoomAt(zoom * 1.2)} title="Zoom in">
-            <ZoomIn size={18} />
-          </button>
           <input
             className="prompt"
             value={promptText}
@@ -2382,10 +2371,9 @@ function App() {
             placeholder="SAM text prompt"
             title="SAM text prompt. New masks are named with the Class Name field on the left."
           />
-          <button onClick={runTextPrompt} title="Run text prompt">
+          <button onClick={runTextPrompt} title="Run text prompt (G)">
             <Wand2 size={18} />
           </button>
-          {tool === "polygon" && <button onClick={finishPolygon}>Finish Polygon</button>}
           {selectedCandidateObj && (
             <button onClick={acceptSelectedCandidate} title="Save selected candidate as object">
               <Check size={16} />
@@ -2501,7 +2489,7 @@ function App() {
                   </label>
                 )}
               </div>
-              {candidates.length === 0 && <p className="hint">Run a prompt or draw a polygon. Accept saves a candidate as an object.</p>}
+              {candidates.length === 0 && <p className="hint">Run a prompt. Accept saves a candidate as an object.</p>}
               {candidates.map((candidate, index) => (
                 <div
                   key={candidate.localId}

@@ -153,8 +153,10 @@ small {
 }
 
 .prompt {
-  width:max-content;
-  flex: 1 1 180px;
+  width: auto;
+  flex: 0 1 260px;
+  min-width: 140px;
+  max-width: 320px;
 }
 
 .export-controls {
