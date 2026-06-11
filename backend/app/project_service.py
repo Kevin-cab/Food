@@ -10,6 +10,7 @@ from .db import ProjectDb
 from .schemas import ImagePage, ImageRecord, ProjectIndexStatus, ProjectSummary
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+COUNT_OPERATORS = {"lt": "<", "lte": "<=", "eq": "=", "gte": ">=", "gt": ">"}
 
 
 class ProjectService:
@@ -143,31 +144,102 @@ class ProjectService:
             raise
         return count
 
-    def image_count(self, project: ProjectDb | None = None, q: str | None = None) -> int:
-        project = project or self.require()
-        query = "SELECT COUNT(*) AS n FROM images"
-        params: tuple = ()
+    def _image_summary_query(
+        self,
+        q: str | None = None,
+        mask_filter: str = "all",
+        class_name: str | None = None,
+        count_op: str | None = None,
+        count_value: int | None = None,
+    ) -> tuple[str, list[object]]:
+        where: list[str] = []
+        select_params: list[object] = []
+        where_params: list[object] = []
+        class_name = class_name.strip() if class_name else None
         if q:
-            query += " WHERE file_name LIKE ?"
-            params = (f"%{q}%",)
-        with project.connect() as conn:
-            return int(conn.execute(query, params).fetchone()["n"])
+            where.append("i.file_name LIKE ?")
+            where_params.append(f"%{q}%")
+        class_select = "NULL AS matching_class_count"
+        if class_name:
+            class_select = "SUM(CASE WHEN c.name = ? THEN 1 ELSE 0 END) AS matching_class_count"
+            select_params.append(class_name)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        outer_where: list[str] = []
+        outer_params: list[object] = []
+        if mask_filter == "with_masks":
+            outer_where.append("accepted_object_count > 0")
+        elif mask_filter == "without_masks":
+            outer_where.append("accepted_object_count = 0")
+        if class_name:
+            outer_where.append("COALESCE(matching_class_count, 0) > 0")
+        if count_op and count_value is not None:
+            operator = COUNT_OPERATORS.get(count_op)
+            if operator:
+                outer_where.append(f"accepted_object_count {operator} ?")
+                outer_params.append(int(count_value))
+        outer_where_sql = f"WHERE {' AND '.join(outer_where)}" if outer_where else ""
+        query = f"""
+            SELECT * FROM (
+              SELECT
+                i.id,
+                i.file_name,
+                i.width,
+                i.height,
+                COUNT(a.id) AS accepted_object_count,
+                {class_select}
+              FROM images i
+              LEFT JOIN annotations a ON a.image_id = i.id AND a.status = 'accepted'
+              LEFT JOIN categories c ON c.id = a.category_id
+              {where_sql}
+              GROUP BY i.id
+            ) summary
+            {outer_where_sql}
+        """
+        return query, select_params + where_params + outer_params
 
-    def list_images_page(self, limit: int = 100, offset: int = 0, q: str | None = None) -> ImagePage:
-        items = self.list_images(limit=limit, offset=offset, q=q)
-        total = self.image_count(q=q)
+    def image_count(
+        self,
+        project: ProjectDb | None = None,
+        q: str | None = None,
+        mask_filter: str = "all",
+        class_name: str | None = None,
+        count_op: str | None = None,
+        count_value: int | None = None,
+    ) -> int:
+        project = project or self.require()
+        summary_query, params = self._image_summary_query(q, mask_filter, class_name, count_op, count_value)
+        with project.connect() as conn:
+            return int(conn.execute(f"SELECT COUNT(*) AS n FROM ({summary_query}) filtered", params).fetchone()["n"])
+
+    def list_images_page(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        q: str | None = None,
+        mask_filter: str = "all",
+        class_name: str | None = None,
+        count_op: str | None = None,
+        count_value: int | None = None,
+    ) -> ImagePage:
+        items = self.list_images(limit=limit, offset=offset, q=q, mask_filter=mask_filter, class_name=class_name, count_op=count_op, count_value=count_value)
+        total = self.image_count(q=q, mask_filter=mask_filter, class_name=class_name, count_op=count_op, count_value=count_value)
         return ImagePage(items=items, total=total, limit=limit, offset=offset, has_more=offset + len(items) < total)
 
-    def list_images(self, limit: int = 100, offset: int = 0, q: str | None = None) -> list[ImageRecord]:
+    def list_images(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        q: str | None = None,
+        mask_filter: str = "all",
+        class_name: str | None = None,
+        count_op: str | None = None,
+        count_value: int | None = None,
+    ) -> list[ImageRecord]:
         project = self.require()
-        where = ""
-        params: tuple = ()
-        if q:
-            where = "WHERE file_name LIKE ?"
-            params = (f"%{q}%",)
+        query, params = self._image_summary_query(q, mask_filter, class_name, count_op, count_value)
         with project.connect() as conn:
             rows = conn.execute(
-                f"SELECT id, file_name, width, height FROM images {where} ORDER BY file_name LIMIT ? OFFSET ?",
+                f"{query} ORDER BY file_name LIMIT ? OFFSET ?",
                 (*params, limit, offset),
             ).fetchall()
         return [ImageRecord(**dict(row)) for row in rows]
@@ -210,7 +282,20 @@ class ProjectService:
         project = self.require()
         with project.connect() as conn:
             row = conn.execute(
-                "SELECT id, file_name, width, height FROM images WHERE id=?", (image_id,)
+                """
+                SELECT
+                  i.id,
+                  i.file_name,
+                  i.width,
+                  i.height,
+                  COUNT(a.id) AS accepted_object_count,
+                  NULL AS matching_class_count
+                FROM images i
+                LEFT JOIN annotations a ON a.image_id = i.id AND a.status = 'accepted'
+                WHERE i.id=?
+                GROUP BY i.id
+                """,
+                (image_id,),
             ).fetchone()
         if row is None:
             raise KeyError(f"Image not found: {image_id}")

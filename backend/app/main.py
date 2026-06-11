@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -98,9 +99,17 @@ def project_index_status():
 
 
 @app.get("/api/images")
-def list_images(limit: int = Query(100, le=1000), offset: int = 0, q: str | None = None):
+def list_images(
+    limit: int = Query(100, le=1000),
+    offset: int = 0,
+    q: str | None = None,
+    mask_filter: Literal["all", "with_masks", "without_masks"] = "all",
+    class_name: str | None = None,
+    count_op: Literal["lt", "lte", "eq", "gte", "gt"] | None = None,
+    count_value: int | None = Query(default=None, ge=0),
+):
     project_or_400()
-    return projects.list_images_page(limit=limit, offset=offset, q=q)
+    return projects.list_images_page(limit=limit, offset=offset, q=q, mask_filter=mask_filter, class_name=class_name, count_op=count_op, count_value=count_value)
 
 
 @app.get("/api/images/{image_id}")

@@ -73,6 +73,38 @@ class BackendCoreTest(unittest.TestCase):
         self.assertTrue(Path(exported.coco_json).exists())
         self.assertEqual(exported.mask_count, 1)
 
+    def test_image_filters_and_object_counts(self) -> None:
+        images = self.projects.list_images()
+        service = AnnotationService()
+        mask = simple_prompt_mask(images[0].width, images[0].height)
+        service.create_from_png(self.project, images[0].id, "rice", mask_to_png_data(mask))
+        service.create_from_png(self.project, images[0].id, "soup", mask_to_png_data(mask))
+        service.create_from_png(self.project, images[1].id, "rice", mask_to_png_data(mask), status="rejected")
+
+        all_images = self.projects.list_images()
+        counts = {image.file_name: image.accepted_object_count for image in all_images}
+        self.assertEqual(counts["a.jpg"], 2)
+        self.assertEqual(counts["b.jpg"], 0)
+
+        with_masks = self.projects.list_images(mask_filter="with_masks")
+        self.assertEqual([image.file_name for image in with_masks], ["a.jpg"])
+
+        without_masks = self.projects.list_images(mask_filter="without_masks")
+        self.assertEqual([image.file_name for image in without_masks], ["b.jpg"])
+
+        rice_images = self.projects.list_images(class_name="rice")
+        self.assertEqual([image.file_name for image in rice_images], ["a.jpg"])
+        self.assertEqual(rice_images[0].matching_class_count, 1)
+
+        self.assertEqual([image.file_name for image in self.projects.list_images(count_op="lt", count_value=1)], ["b.jpg"])
+        self.assertEqual([image.file_name for image in self.projects.list_images(count_op="lte", count_value=0)], ["b.jpg"])
+        self.assertEqual([image.file_name for image in self.projects.list_images(count_op="eq", count_value=2)], ["a.jpg"])
+        self.assertEqual([image.file_name for image in self.projects.list_images(count_op="gte", count_value=2)], ["a.jpg"])
+        self.assertEqual([image.file_name for image in self.projects.list_images(count_op="gt", count_value=1)], ["a.jpg"])
+
+        combined = self.projects.list_images(q="a", class_name="rice", count_op="gte", count_value=1)
+        self.assertEqual([image.file_name for image in combined], ["a.jpg"])
+
     def test_annotation_undo_redo_and_delete_mask_files(self) -> None:
         images = self.projects.list_images()
         service = AnnotationService()

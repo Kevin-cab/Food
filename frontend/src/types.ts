@@ -3,7 +3,12 @@ export type ImageRecord = {
   file_name: string;
   width: number;
   height: number;
+  accepted_object_count: number;
+  matching_class_count: number | null;
 };
+
+export type ImageMaskFilter = "all" | "with_masks" | "without_masks";
+export type ImageCountOperator = "lt" | "lte" | "eq" | "gte" | "gt";
 
 export type ExportWorkspaceImageRecord = ImageRecord & {
   annotation_count: number;

@@ -30,6 +30,8 @@ class ImageRecord(BaseModel):
     file_name: str
     width: int
     height: int
+    accepted_object_count: int = 0
+    matching_class_count: int | None = None
 
 
 class ExportWorkspaceImageRecord(BaseModel):

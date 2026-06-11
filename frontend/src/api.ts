@@ -1,4 +1,4 @@
-import type { AnnotationRecord, BulkJobRecord, BulkMode, ClipStatus, ExportCocoRequest, ExportCocoResponse, ExportWorkspaceResponse, ImagePage, MaskCandidate, ProjectIndexStatus, ReviewCandidateRecord, SearchResult } from "./types";
+import type { AnnotationRecord, BulkJobRecord, BulkMode, ClipStatus, ExportCocoRequest, ExportCocoResponse, ExportWorkspaceResponse, ImageCountOperator, ImageMaskFilter, ImagePage, MaskCandidate, ProjectIndexStatus, ReviewCandidateRecord, SearchResult } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -53,11 +53,15 @@ export const api = {
       body: JSON.stringify({ path })
     }),
   projectIndexStatus: () => request<ProjectIndexStatus>("/api/projects/index-status"),
-  listImages: (params: { limit?: number; offset?: number; q?: string } = {}) => {
+  listImages: (params: { limit?: number; offset?: number; q?: string; mask_filter?: ImageMaskFilter; class_name?: string; count_op?: ImageCountOperator; count_value?: number | null } = {}) => {
     const search = new URLSearchParams();
     search.set("limit", String(params.limit ?? 200));
     search.set("offset", String(params.offset ?? 0));
     if (params.q) search.set("q", params.q);
+    if (params.mask_filter && params.mask_filter !== "all") search.set("mask_filter", params.mask_filter);
+    if (params.class_name) search.set("class_name", params.class_name);
+    if (params.count_op) search.set("count_op", params.count_op);
+    if (params.count_value != null) search.set("count_value", String(params.count_value));
     return request<ImagePage>(`/api/images?${search.toString()}`);
   },
   listAnnotations: (imageId: number) =>

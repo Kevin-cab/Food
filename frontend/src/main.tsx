@@ -25,7 +25,7 @@ import {
   X
 } from "lucide-react";
 import { annotationMaskUrl, api, imageUrl } from "./api";
-import type { AnnotationRecord, BulkJobRecord, BulkMode, CandidateFilterMode, ClipStatus, ExportCocoRequest, ExportSplit, ImageRecord, MaskCandidate, ProjectIndexStatus, ReviewCandidateRecord, SearchResult, ToolMode } from "./types";
+import type { AnnotationRecord, BulkJobRecord, BulkMode, CandidateFilterMode, ClipStatus, ExportCocoRequest, ExportSplit, ImageCountOperator, ImageMaskFilter, ImageRecord, MaskCandidate, ProjectIndexStatus, ReviewCandidateRecord, SearchResult, ToolMode } from "./types";
 import "./styles.css";
 
 type Point = { x: number; y: number };
@@ -109,6 +109,12 @@ function App() {
   const [images, setImages] = useState<ImageRecord[]>([]);
   const [imageTotal, setImageTotal] = useState(0);
   const [annotationClassName, setAnnotationClassName] = useState("food");
+  const [imageFiltersOpen, setImageFiltersOpen] = useState(false);
+  const [imageFilenameFilter, setImageFilenameFilter] = useState("");
+  const [imageMaskFilter, setImageMaskFilter] = useState<ImageMaskFilter>("all");
+  const [imageClassFilter, setImageClassFilter] = useState("");
+  const [imageCountOp, setImageCountOp] = useState<ImageCountOperator>("gte");
+  const [imageCountValue, setImageCountValue] = useState("");
   const [imageLoading, setImageLoading] = useState(false);
   const [imageHasMore, setImageHasMore] = useState(false);
   const [indexStatus, setIndexStatus] = useState<ProjectIndexStatus | null>(null);
@@ -192,6 +198,11 @@ function App() {
   const viewportScale = fitScale * zoom;
   const canUndo = undoKinds.length > 0 || candidateHistory.length > 0 || editorHistory.length > 0 || Boolean(selectedAnnotation);
   const canRedo = redoKinds.length > 0 || Boolean(selectedAnnotation);
+  const imageFilterKey = useMemo(
+    () => JSON.stringify({ q: imageFilenameFilter.trim(), mask: imageMaskFilter, cls: imageClassFilter.trim(), op: imageCountOp, count: imageCountValue.trim() }),
+    [imageFilenameFilter, imageMaskFilter, imageClassFilter, imageCountOp, imageCountValue]
+  );
+  const hasImageFilters = Boolean(imageFilenameFilter.trim() || imageClassFilter.trim() || imageMaskFilter !== "all" || imageCountValue.trim());
   const exportFolderMap = useMemo(() => new Map(exportFolders.map((folder) => [folder.folder, folder])), [exportFolders]);
   const exportBuckets = useMemo(
     () => ({
@@ -434,6 +445,11 @@ function App() {
   }, [project, images.length]);
 
   useEffect(() => {
+    if (!project) return;
+    void loadImagePage(0, true);
+  }, [project, imageFilterKey]);
+
+  useEffect(() => {
     if (!selectedJobId) return;
     void refreshReviewCandidates(selectedJobId);
     const job = bulkJobs.find((item) => item.id === selectedJobId);
@@ -477,6 +493,12 @@ function App() {
     setProjectKey("");
     setImages([]);
     setImageTotal(0);
+    setImageFiltersOpen(false);
+    setImageFilenameFilter("");
+    setImageMaskFilter("all");
+    setImageClassFilter("");
+    setImageCountOp("gte");
+    setImageCountValue("");
     setImageHasMore(false);
     setIndexStatus(null);
     setCurrentIndex(0);
@@ -510,6 +532,27 @@ function App() {
     clearMaskCanvas();
   }
 
+  function imageListParams(offset = 0) {
+    const parsedCount = imageCountValue.trim() === "" ? null : Number.parseInt(imageCountValue, 10);
+    return {
+      limit: IMAGE_PAGE_SIZE,
+      offset,
+      q: imageFilenameFilter.trim() || undefined,
+      mask_filter: imageMaskFilter,
+      class_name: imageClassFilter.trim() || undefined,
+      count_op: Number.isFinite(parsedCount) && parsedCount !== null ? imageCountOp : undefined,
+      count_value: Number.isFinite(parsedCount) && parsedCount !== null ? Math.max(0, parsedCount) : null
+    };
+  }
+
+  function clearImageFilters() {
+    setImageFilenameFilter("");
+    setImageMaskFilter("all");
+    setImageClassFilter("");
+    setImageCountOp("gte");
+    setImageCountValue("");
+  }
+
   async function openProject() {
     resetProjectState();
     setStatus("Opening project and starting background index...");
@@ -536,7 +579,7 @@ function App() {
     if (imageLoading) return;
     setImageLoading(true);
     try {
-      const page = await api.listImages({ limit: IMAGE_PAGE_SIZE, offset });
+      const page = await api.listImages(imageListParams(offset));
       setImageTotal(page.total);
       setImageHasMore(page.has_more);
       setImages((previous) => {
@@ -1627,7 +1670,14 @@ function App() {
       const nextFolders = response.folders.map((folder) => ({
         folder: folder.folder,
         images: folder.images,
-        annotatedImages: folder.images.map((image) => ({ id: image.id, file_name: image.file_name, width: image.width, height: image.height })),
+        annotatedImages: folder.images.map((image) => ({
+          id: image.id,
+          file_name: image.file_name,
+          width: image.width,
+          height: image.height,
+          accepted_object_count: image.accepted_object_count ?? image.annotation_count ?? 0,
+          matching_class_count: image.matching_class_count ?? null
+        })),
         annotationCount: folder.annotation_count,
       }));
 
@@ -2317,6 +2367,57 @@ function App() {
               placeholder="Class name for new masks"
             />
           </label>
+          <button className="panel-action" onClick={() => setImageFiltersOpen((open) => !open)}>
+            {imageFiltersOpen ? "Hide Image Filters" : "Show Image Filters"}{hasImageFilters ? " *" : ""}
+          </button>
+          {imageFiltersOpen && (
+            <div className="image-filters">
+              <input
+                value={imageFilenameFilter}
+                onChange={(event) => setImageFilenameFilter(event.target.value)}
+                placeholder="Search filenames"
+              />
+              <label>
+                Mask Status
+                <select value={imageMaskFilter} onChange={(event) => setImageMaskFilter(event.target.value as ImageMaskFilter)}>
+                  <option value="all">All</option>
+                  <option value="with_masks">With masks</option>
+                  <option value="without_masks">Without masks</option>
+                </select>
+              </label>
+              <label>
+                Class Filter
+                <div className="input-action-row">
+                  <input
+                    value={imageClassFilter}
+                    onChange={(event) => setImageClassFilter(event.target.value)}
+                    placeholder="Exact class name"
+                  />
+                  <button onClick={() => setImageClassFilter(activeClassName)}>Use Class</button>
+                </div>
+              </label>
+              <label>
+                Object Count
+                <div className="count-filter-row">
+                  <select value={imageCountOp} onChange={(event) => setImageCountOp(event.target.value as ImageCountOperator)}>
+                    <option value="lt">&lt;</option>
+                    <option value="lte">&lt;=</option>
+                    <option value="eq">=</option>
+                    <option value="gte">&gt;=</option>
+                    <option value="gt">&gt;</option>
+                  </select>
+                  <input
+                    type="number"
+                    min="0"
+                    value={imageCountValue}
+                    onChange={(event) => setImageCountValue(event.target.value)}
+                    placeholder="Any"
+                  />
+                </div>
+              </label>
+              <button onClick={clearImageFilters} disabled={!hasImageFilters}>Clear Filters</button>
+            </div>
+          )}
           <p className="hint">
             {indexStatus?.status === "indexing"
               ? `Indexing... ${indexStatus.indexed_count} indexed`
@@ -2330,7 +2431,10 @@ function App() {
                 onClick={() => setCurrentIndex(index)}
               >
                 <span>{image.file_name}</span>
-                <small>{image.width}x{image.height}</small>
+                <small>
+                  {image.width}x{image.height} | {image.accepted_object_count} obj
+                  {imageClassFilter.trim() && image.matching_class_count != null ? ` | ${image.matching_class_count} class` : ""}
+                </small>
               </button>
             ))}
             {imageLoading && <p className="hint">Loading images...</p>}
