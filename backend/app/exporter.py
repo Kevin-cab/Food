@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import csv
 from datetime import datetime
 from pathlib import Path
 
@@ -211,8 +212,10 @@ def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     export_dir = root / f"combined_coco_export_{timestamp}"
+    images_dir = export_dir / "images"
     masks_dir = export_dir / "masks"
     semantic_dir = export_dir / "semantic_rgb"
+    images_dir.mkdir(parents=True, exist_ok=True)
     masks_dir.mkdir(parents=True, exist_ok=True)
     semantic_dir.mkdir(parents=True, exist_ok=True)
 
@@ -221,6 +224,7 @@ def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse
     categories = []
     annotations = []
     polygon_sidecar = []
+    manifest_rows = []
     split_image_ids: dict[str, list[int]] = {split: [] for split in SPLITS}
     issues = []
     mask_count = 0
@@ -246,35 +250,55 @@ def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse
                 ).fetchall()
             ]
 
+        project_category_names = {int(category["id"]): str(category["name"]) for category in project_categories}
         category_map: dict[int, int] = {}
-        for category in project_categories:
-            name = str(category["name"])
+
+        def combined_category_id(source_category_id: int) -> int:
+            if source_category_id <= 0:
+                return 0
+            name = project_category_names.get(source_category_id)
+            if not name:
+                return 0
             if name not in categories_by_name:
                 categories_by_name[name] = len(categories_by_name) + 1
                 categories.append({"id": categories_by_name[name], "name": name})
-            category_map[int(category["id"])] = categories_by_name[name]
+            category_map[source_category_id] = categories_by_name[name]
+            return categories_by_name[name]
 
         new_image_by_old: dict[int, dict] = {}
+        image_copy_by_old: dict[int, str] = {}
         for image in project_images:
             old_image_id = int(image["id"])
             if old_image_id not in selected_image_ids:
                 continue
             split = split_by_image[old_image_id]
+            src_image = project.root / image["file_name"]
+            image_suffix = src_image.suffix or ".jpg"
+            image_name = f"{folder_slug}_{old_image_id}{image_suffix}"
+            image_dst_dir = images_dir / split
+            image_dst_dir.mkdir(parents=True, exist_ok=True)
+            image_dst = image_dst_dir / image_name
+            if src_image.exists():
+                shutil.copy2(src_image, image_dst)
+            image_rel = str(image_dst.relative_to(export_dir)).replace("\\", "/")
             new_image = {
                 "id": next_image_id,
-                "file_name": f"{folder_prefix}/{image['file_name']}",
+                "file_name": image_rel,
                 "width": int(image["width"]),
                 "height": int(image["height"]),
                 "source_folder": folder_split.folder,
                 "source_image_id": old_image_id,
+                "source_file_name": image["file_name"],
                 "split": split,
             }
             images.append(new_image)
             split_image_ids[split].append(next_image_id)
             new_image_by_old[old_image_id] = new_image
+            image_copy_by_old[old_image_id] = image_rel
             next_image_id += 1
 
         anns_by_image: dict[int, list[dict]] = {}
+        mask_paths_by_image: dict[int, list[str]] = {}
         for ann in project_annotations:
             old_image_id = int(ann["image_id"])
             new_image = new_image_by_old.get(old_image_id)
@@ -291,15 +315,17 @@ def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse
             dst = dst_dir / f"{folder_slug}_{ann['id']}.png"
             shutil.copy2(mask_abs, dst)
             category_id = int(ann["category_id"]) if ann["category_id"] else 0
+            category_id = combined_category_id(category_id)
+            mask_rel = str(dst.relative_to(export_dir)).replace("\\", "/")
             new_annotation = {
                 "id": next_annotation_id,
                 "image_id": int(new_image["id"]),
-                "category_id": category_map.get(category_id, 0),
+                "category_id": category_id,
                 "segmentation": polygons,
                 "bbox": parse_bbox(ann["bbox_json"]),
                 "area": int(ann["area"]),
                 "iscrowd": int(ann["iscrowd"]),
-                "mask_path": str(dst.relative_to(export_dir)).replace("\\", "/"),
+                "mask_path": mask_rel,
                 "version": int(ann["version"]),
                 "source_folder": folder_split.folder,
                 "source_annotation_id": int(ann["id"]),
@@ -308,6 +334,7 @@ def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse
             annotations.append(new_annotation)
             polygon_sidecar.append({"annotation_id": next_annotation_id, "polygons": polygons})
             anns_by_image.setdefault(old_image_id, []).append(ann)
+            mask_paths_by_image.setdefault(old_image_id, []).append(mask_rel)
             next_annotation_id += 1
             mask_count += 1
 
@@ -318,12 +345,22 @@ def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse
                 if not mask_abs.exists():
                     continue
                 mask = load_mask(mask_abs)
-                color = _color_for_id(int(ann["category_id"] or ann["id"]))
+                category_id = int(ann["category_id"]) if ann["category_id"] else 0
+                color = _color_for_id(category_map.get(category_id, combined_category_id(category_id)))
                 semantic[mask] = color
             split = str(new_image["split"])
             dst_dir = semantic_dir / split
             dst_dir.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(semantic, mode="RGB").save(dst_dir / f"{folder_slug}_{new_image['id']}.png")
+            semantic_path = dst_dir / f"{folder_slug}_{new_image['id']}.png"
+            Image.fromarray(semantic, mode="RGB").save(semantic_path)
+            manifest_rows.append(
+                {
+                    "image_path": image_copy_by_old[old_image_id],
+                    "masks": ";".join(mask_paths_by_image.get(old_image_id, [])),
+                    "semantic_rgb": str(semantic_path.relative_to(export_dir)).replace("\\", "/"),
+                    "split": split,
+                }
+            )
 
         issues.extend(validate_project(project))
 
@@ -341,6 +378,8 @@ def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse
     coco_path = export_dir / "annotations_coco.json"
     polygon_path = export_dir / "polygons.json"
     qa_path = export_dir / "qa_report.json"
+    manifest_path = export_dir / "manifest.csv"
+    labels_path = export_dir / "labels.json"
     coco_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     split_coco_jsons = {}
     for split in SPLITS:
@@ -355,6 +394,11 @@ def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse
         split_coco_jsons[split] = str(split_path)
     polygon_path.write_text(json.dumps(polygon_sidecar, indent=2), encoding="utf-8")
     qa_path.write_text(json.dumps([issue.model_dump() for issue in issues], indent=2), encoding="utf-8")
+    labels_path.write_text(json.dumps(_labels_payload(categories), indent=2), encoding="utf-8")
+    with manifest_path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=["image_path", "masks", "semantic_rgb", "split"])
+        writer.writeheader()
+        writer.writerows(manifest_rows)
 
     return ExportResponse(
         export_dir=str(export_dir),
@@ -379,6 +423,17 @@ def _resolve_export_folder(root: Path, folder: str) -> Path:
 def _safe_export_name(value: str) -> str:
     safe = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in value)
     return safe.strip("_") or "folder"
+
+
+def _labels_payload(categories: list[dict]) -> dict[str, dict]:
+    labels = {"0": {"name": "background", "color": [0, 0, 0]}}
+    for category in sorted(categories, key=lambda item: int(item["id"])):
+        category_id = int(category["id"])
+        labels[str(category_id)] = {
+            "name": str(category["name"]),
+            "color": list(_color_for_id(category_id)),
+        }
+    return labels
 
 
 def _split_by_image(request: ExportCocoRequest | None) -> dict[int, str]:
@@ -451,16 +506,10 @@ def scan_export_workspace(root: Path) -> ExportWorkspaceResponse:
 
 
 def _color_for_id(value: int) -> tuple[int, int, int]:
-    palette = [
-        (230, 25, 75),
-        (60, 180, 75),
-        (255, 225, 25),
-        (0, 130, 200),
-        (245, 130, 48),
-        (145, 30, 180),
-        (70, 240, 240),
-        (240, 50, 230),
-        (210, 245, 60),
-        (250, 190, 190),
-    ]
-    return palette[value % len(palette)]
+    if value <= 0:
+        return (0, 0, 0)
+    mixed = (value * 2654435761) & 0xFFFFFF
+    r = ((mixed >> 16) + 64) % 256
+    g = (((mixed >> 8) & 0xFF) + 64) % 256
+    b = ((mixed & 0xFF) + 64) % 256
+    return (r, g, b)

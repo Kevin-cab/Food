@@ -261,6 +261,51 @@ small {
   gap: 6px;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(27, 29, 26, 0.42);
+}
+
+.progress-modal {
+  display: grid;
+  gap: 10px;
+  width: min(360px, 100%);
+  padding: 18px;
+  border: 1px solid #c9cfc4;
+  border-radius: 8px;
+  background: #fbfcf7;
+  box-shadow: 0 16px 40px rgba(27, 29, 26, 0.22);
+}
+
+.progress-track {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #d8ddd1;
+}
+
+.progress-bar {
+  width: 42%;
+  height: 100%;
+  border-radius: inherit;
+  background: #1c8f73;
+  animation: export-progress 1.1s ease-in-out infinite;
+}
+
+@keyframes export-progress {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(260%);
+  }
+}
+
 .split-folder.active {
   border-color: #17a989;
   background: #e6f6ef;

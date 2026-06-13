@@ -168,6 +168,7 @@ function App() {
   const [exportTrainPercent, setExportTrainPercent] = useState(70);
   const [exportValPercent, setExportValPercent] = useState(15);
   const [exportTestPercent, setExportTestPercent] = useState(15);
+  const [exportProgressMessage, setExportProgressMessage] = useState<string | null>(null);
 
   const stageRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1858,10 +1859,15 @@ function App() {
           }
         };
     setStatus("Validating and exporting...");
-    const result = await api.exportCoco(assignedCount > 0 ? payload : undefined);
-    const splitFiles = Object.keys(result.split_coco_jsons ?? {}).length;
-    const folderCount = result.folder_exports?.length ?? 0;
-    setStatus(`Exported ${result.mask_count} masks into ${splitFiles || 1} COCO file(s)${folderCount ? ` across ${folderCount} folder(s)` : ""} at ${result.export_dir}`);
+    setExportProgressMessage("Exporting folder datasets...");
+    try {
+      const result = await api.exportCoco(assignedCount > 0 ? payload : undefined);
+      const splitFiles = Object.keys(result.split_coco_jsons ?? {}).length;
+      const folderCount = result.folder_exports?.length ?? 0;
+      setStatus(`Exported ${result.mask_count} masks into ${splitFiles || 1} COCO file(s)${folderCount ? ` across ${folderCount} folder(s)` : ""} at ${result.export_dir}`);
+    } finally {
+      setExportProgressMessage(null);
+    }
   }
 
   async function runCombinedExport() {
@@ -1870,9 +1876,14 @@ function App() {
       return;
     }
     setStatus("Validating and exporting combined dataset...");
-    const result = await api.exportCoco(buildWorkspaceExportPayload(true));
-    const splitFiles = Object.keys(result.split_coco_jsons ?? {}).length;
-    setStatus(`Exported combined dataset with ${result.mask_count} masks into ${splitFiles || 1} COCO file(s) at ${result.export_dir}`);
+    setExportProgressMessage("Exporting combined dataset...");
+    try {
+      const result = await api.exportCoco(buildWorkspaceExportPayload(true));
+      const splitFiles = Object.keys(result.split_coco_jsons ?? {}).length;
+      setStatus(`Exported combined dataset with ${result.mask_count} masks into ${splitFiles || 1} COCO file(s) at ${result.export_dir}`);
+    } finally {
+      setExportProgressMessage(null);
+    }
   }
 
   async function runQa() {
@@ -3069,6 +3080,17 @@ function App() {
           </>
         )}
       </aside>
+      {exportProgressMessage && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="progress-modal" role="dialog" aria-modal="true" aria-labelledby="export-progress-title">
+            <strong id="export-progress-title">Export in progress</strong>
+            <small>{exportProgressMessage}</small>
+            <div className="progress-track" aria-label="Export progress">
+              <div className="progress-bar" />
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

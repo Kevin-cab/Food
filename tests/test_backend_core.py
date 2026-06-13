@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 import json
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -203,9 +204,21 @@ class BackendCoreTest(unittest.TestCase):
         export_dir = Path(exported.export_dir)
         self.assertEqual(export_dir.parent, self.root.resolve())
         self.assertTrue(export_dir.name.startswith("combined_coco_export_"))
+        self.assertTrue(any((export_dir / "images" / "train").iterdir()))
+        self.assertTrue((export_dir / "manifest.csv").exists())
+        labels = json.loads((export_dir / "labels.json").read_text(encoding="utf-8"))
+        self.assertEqual(labels["0"], {"name": "background", "color": [0, 0, 0]})
+        self.assertEqual(labels["1"]["name"], "rice")
+        self.assertEqual(len(labels["1"]["color"]), 3)
         train_payload = json.loads(Path(exported.split_coco_jsons["train"]).read_text(encoding="utf-8"))
         self.assertEqual(len(train_payload["images"]), 1)
         self.assertEqual(train_payload["images"][0]["split"], "train")
+        with (export_dir / "manifest.csv").open(encoding="utf-8", newline="") as file:
+            rows = list(csv.DictReader(file))
+        self.assertEqual(rows[0]["split"], "train")
+        self.assertTrue(rows[0]["image_path"].startswith("images/train/"))
+        self.assertTrue(rows[0]["masks"].startswith("masks/train/"))
+        self.assertTrue(rows[0]["semantic_rgb"].startswith("semantic_rgb/train/"))
 
     def test_clip_fallback_search(self) -> None:
         clip = ClipService(Path.cwd(), allow_fallback=True)
