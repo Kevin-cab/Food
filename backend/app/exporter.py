@@ -199,6 +199,188 @@ def export_workspace_coco(request: ExportCocoRequest) -> ExportResponse:
     )
 
 
+def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse:
+    if not request.root:
+        raise ValueError("Export root is required for combined export")
+    if not request.folder_splits:
+        raise ValueError("No folder splits were provided for combined export")
+
+    root = Path(request.root).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"Export root does not exist: {root}")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    export_dir = root / f"combined_coco_export_{timestamp}"
+    masks_dir = export_dir / "masks"
+    semantic_dir = export_dir / "semantic_rgb"
+    masks_dir.mkdir(parents=True, exist_ok=True)
+    semantic_dir.mkdir(parents=True, exist_ok=True)
+
+    images = []
+    categories_by_name: dict[str, int] = {}
+    categories = []
+    annotations = []
+    polygon_sidecar = []
+    split_image_ids: dict[str, list[int]] = {split: [] for split in SPLITS}
+    issues = []
+    mask_count = 0
+    next_image_id = 1
+    next_annotation_id = 1
+
+    for folder_split in request.folder_splits:
+        project_root = _resolve_export_folder(root, folder_split.folder)
+        project = ProjectDb(project_root)
+        split_by_image = _split_by_image(ExportCocoRequest(splits=folder_split.splits))
+        selected_image_ids = set(split_by_image)
+        folder_prefix = folder_split.folder.strip("./").replace("\\", "/")
+        folder_prefix = folder_prefix or project_root.name
+        folder_slug = _safe_export_name(folder_prefix)
+
+        with project.connect() as conn:
+            project_images = [dict(row) for row in conn.execute("SELECT * FROM images ORDER BY id").fetchall()]
+            project_categories = [dict(row) for row in conn.execute("SELECT * FROM categories ORDER BY id").fetchall()]
+            project_annotations = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM annotations WHERE status='accepted' ORDER BY id"
+                ).fetchall()
+            ]
+
+        category_map: dict[int, int] = {}
+        for category in project_categories:
+            name = str(category["name"])
+            if name not in categories_by_name:
+                categories_by_name[name] = len(categories_by_name) + 1
+                categories.append({"id": categories_by_name[name], "name": name})
+            category_map[int(category["id"])] = categories_by_name[name]
+
+        new_image_by_old: dict[int, dict] = {}
+        for image in project_images:
+            old_image_id = int(image["id"])
+            if old_image_id not in selected_image_ids:
+                continue
+            split = split_by_image[old_image_id]
+            new_image = {
+                "id": next_image_id,
+                "file_name": f"{folder_prefix}/{image['file_name']}",
+                "width": int(image["width"]),
+                "height": int(image["height"]),
+                "source_folder": folder_split.folder,
+                "source_image_id": old_image_id,
+                "split": split,
+            }
+            images.append(new_image)
+            split_image_ids[split].append(next_image_id)
+            new_image_by_old[old_image_id] = new_image
+            next_image_id += 1
+
+        anns_by_image: dict[int, list[dict]] = {}
+        for ann in project_annotations:
+            old_image_id = int(ann["image_id"])
+            new_image = new_image_by_old.get(old_image_id)
+            if not new_image:
+                continue
+            mask_abs = project.meta_dir / ann["mask_path"]
+            if not mask_abs.exists():
+                continue
+            mask = load_mask(mask_abs)
+            polygons = mask_to_polygons(mask)
+            split = str(new_image["split"])
+            dst_dir = masks_dir / split
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            dst = dst_dir / f"{folder_slug}_{ann['id']}.png"
+            shutil.copy2(mask_abs, dst)
+            category_id = int(ann["category_id"]) if ann["category_id"] else 0
+            new_annotation = {
+                "id": next_annotation_id,
+                "image_id": int(new_image["id"]),
+                "category_id": category_map.get(category_id, 0),
+                "segmentation": polygons,
+                "bbox": parse_bbox(ann["bbox_json"]),
+                "area": int(ann["area"]),
+                "iscrowd": int(ann["iscrowd"]),
+                "mask_path": str(dst.relative_to(export_dir)).replace("\\", "/"),
+                "version": int(ann["version"]),
+                "source_folder": folder_split.folder,
+                "source_annotation_id": int(ann["id"]),
+                "split": split,
+            }
+            annotations.append(new_annotation)
+            polygon_sidecar.append({"annotation_id": next_annotation_id, "polygons": polygons})
+            anns_by_image.setdefault(old_image_id, []).append(ann)
+            next_annotation_id += 1
+            mask_count += 1
+
+        for old_image_id, new_image in new_image_by_old.items():
+            semantic = np.zeros((int(new_image["height"]), int(new_image["width"]), 3), dtype=np.uint8)
+            for ann in anns_by_image.get(old_image_id, []):
+                mask_abs = project.meta_dir / ann["mask_path"]
+                if not mask_abs.exists():
+                    continue
+                mask = load_mask(mask_abs)
+                color = _color_for_id(int(ann["category_id"] or ann["id"]))
+                semantic[mask] = color
+            split = str(new_image["split"])
+            dst_dir = semantic_dir / split
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(semantic, mode="RGB").save(dst_dir / f"{folder_slug}_{new_image['id']}.png")
+
+        issues.extend(validate_project(project))
+
+    payload = {
+        "info": {
+            "description": "FoodSegmentation combined workspace export",
+            "version": timestamp,
+            "date_created": datetime.now().isoformat(timespec="seconds"),
+        },
+        "images": images,
+        "categories": categories,
+        "annotations": annotations,
+        "splits": {split: sorted(ids) for split, ids in split_image_ids.items()},
+    }
+    coco_path = export_dir / "annotations_coco.json"
+    polygon_path = export_dir / "polygons.json"
+    qa_path = export_dir / "qa_report.json"
+    coco_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    split_coco_jsons = {}
+    for split in SPLITS:
+        ids = set(split_image_ids[split])
+        split_payload = {
+            **payload,
+            "images": [image for image in images if int(image["id"]) in ids],
+            "annotations": [ann for ann in annotations if int(ann["image_id"]) in ids],
+        }
+        split_path = export_dir / f"annotations_{split}_coco.json"
+        split_path.write_text(json.dumps(split_payload, indent=2), encoding="utf-8")
+        split_coco_jsons[split] = str(split_path)
+    polygon_path.write_text(json.dumps(polygon_sidecar, indent=2), encoding="utf-8")
+    qa_path.write_text(json.dumps([issue.model_dump() for issue in issues], indent=2), encoding="utf-8")
+
+    return ExportResponse(
+        export_dir=str(export_dir),
+        coco_json=str(coco_path),
+        mask_count=mask_count,
+        issues=issues,
+        split_coco_jsons=split_coco_jsons,
+    )
+
+
+def _resolve_export_folder(root: Path, folder: str) -> Path:
+    project_root = (root / folder).resolve()
+    try:
+        project_root.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Export folder escapes root: {folder}") from exc
+    if not (project_root / ".foodseg" / "annotations.db").exists():
+        raise ValueError(f"Export folder is missing annotations: {folder}")
+    return project_root
+
+
+def _safe_export_name(value: str) -> str:
+    safe = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in value)
+    return safe.strip("_") or "folder"
+
+
 def _split_by_image(request: ExportCocoRequest | None) -> dict[int, str]:
     if request is None or not request.splits:
         return {}

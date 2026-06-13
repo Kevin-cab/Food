@@ -219,6 +219,15 @@ function App() {
     () => exportFolders.reduce((total, folder) => total + folder.annotatedImages.length, 0),
     [exportFolders]
   );
+  const allExportFoldersSplit = useMemo(
+    () => exportFolders.length > 0 && exportFolders.every((folder) => Boolean(exportSplitPlans[folder.folder])),
+    [exportFolders, exportSplitPlans]
+  );
+  const exportAllCombined = useMemo(() => {
+    if (!allExportFoldersSplit) return false;
+    const folderNames = new Set(exportFolders.map((folder) => folder.folder));
+    return exportCombinedGroups.some((group) => group.folders.length === folderNames.size && group.folders.every((folder) => folderNames.has(folder)));
+  }, [allExportFoldersSplit, exportFolders, exportCombinedGroups]);
 
   function clearSelection() {
     setSelectedCandidate(null);
@@ -1742,6 +1751,7 @@ function App() {
         return next;
       });
       setExportCombineSelection((current) => current.filter((folder) => nextFolders.some((item) => item.folder === folder)));
+      setExportCombinedGroups([]);
       setStatus(`Loaded ${nextFolders.length} annotated folders from ${response.root}.`);
     } finally {
       setExportLoading(false);
@@ -1770,6 +1780,7 @@ function App() {
       ...current,
       [folder]: splitFolderImages(folderRecord.images)
     }));
+    setExportCombinedGroups([]);
     setStatus(`Split ${folder} into train/val/test.`);
   }
 
@@ -1783,6 +1794,7 @@ function App() {
       next[folder.folder] = splitFolderImages(folder.images);
     }
     setExportSplitPlans(next);
+    setExportCombinedGroups([]);
     setStatus(`Split ${exportFolders.length} folders using ${exportTrainPercent}/${exportValPercent}/${exportTestPercent} preferences.`);
   }
 
@@ -1792,19 +1804,39 @@ function App() {
     );
   }
 
-  function combineSelectedFolders() {
-    if (exportCombineSelection.length === 0) {
-      setStatus("Select one or more folders to combine.");
+  function combineAllFolders() {
+    if (!allExportFoldersSplit) {
+      setStatus("Split every annotated folder before combining.");
       return;
     }
     const nextGroup = {
       id: Date.now(),
-      name: `Combined dataset ${exportCombinedGroups.length + 1}`,
-      folders: [...exportCombineSelection].sort((a, b) => a.localeCompare(b))
+      name: "Combined dataset",
+      folders: exportFolders.map((folder) => folder.folder).sort((a, b) => a.localeCompare(b))
     };
-    setExportCombinedGroups((groups) => [...groups, nextGroup]);
+    setExportCombinedGroups([nextGroup]);
     setExportCombineSelection([]);
-    setStatus(`Created ${nextGroup.name} from ${nextGroup.folders.length} folder(s).`);
+    setStatus(`Combined all ${nextGroup.folders.length} folder(s).`);
+  }
+
+  function buildWorkspaceExportPayload(combined: boolean): ExportCocoRequest {
+    return {
+      root: exportRoot.trim(),
+      combined,
+      folder_splits: exportFolders
+        .filter((folder) => exportSplitPlans[folder.folder])
+        .map((folder) => {
+          const plan = exportSplitPlans[folder.folder];
+          return {
+            folder: folder.folder,
+            splits: {
+              train: plan.train.map((image) => image.id),
+              val: plan.val.map((image) => image.id),
+              test: plan.test.map((image) => image.id),
+            }
+          };
+        })
+    };
   }
 
   async function runExport() {
@@ -1817,22 +1849,7 @@ function App() {
       return;
     }
     const payload: ExportCocoRequest = exportFolders.length > 0
-      ? {
-          root: exportRoot.trim(),
-          folder_splits: exportFolders
-            .filter((folder) => exportSplitPlans[folder.folder])
-            .map((folder) => {
-              const plan = exportSplitPlans[folder.folder];
-              return {
-                folder: folder.folder,
-                splits: {
-                  train: plan.train.map((image) => image.id),
-                  val: plan.val.map((image) => image.id),
-                  test: plan.test.map((image) => image.id),
-                }
-              };
-            })
-        }
+      ? buildWorkspaceExportPayload(false)
       : {
           splits: {
             train: Object.values(exportSplitPlans).flatMap((plan) => plan.train.map((image) => image.id)),
@@ -1845,6 +1862,17 @@ function App() {
     const splitFiles = Object.keys(result.split_coco_jsons ?? {}).length;
     const folderCount = result.folder_exports?.length ?? 0;
     setStatus(`Exported ${result.mask_count} masks into ${splitFiles || 1} COCO file(s)${folderCount ? ` across ${folderCount} folder(s)` : ""} at ${result.export_dir}`);
+  }
+
+  async function runCombinedExport() {
+    if (!exportAllCombined) {
+      setStatus("Click Combine All before exporting a combined dataset.");
+      return;
+    }
+    setStatus("Validating and exporting combined dataset...");
+    const result = await api.exportCoco(buildWorkspaceExportPayload(true));
+    const splitFiles = Object.keys(result.split_coco_jsons ?? {}).length;
+    setStatus(`Exported combined dataset with ${result.mask_count} masks into ${splitFiles || 1} COCO file(s) at ${result.export_dir}`);
   }
 
   async function runQa() {
@@ -2932,12 +2960,16 @@ function App() {
                 <button onClick={autoSplitFolders} disabled={exportFolders.length === 0}>
                   Auto Split
                 </button>
-                <button onClick={combineSelectedFolders} disabled={exportCombineSelection.length === 0}>
-                  Combine Selected
+                <button onClick={combineAllFolders} disabled={!allExportFoldersSplit || exportAllCombined}>
+                  Combine All
                 </button>
                 <button onClick={runExport} disabled={exportLoading}>
                   <Download size={16} />
-                  Export COCO
+                  Export Folders
+                </button>
+                <button onClick={runCombinedExport} disabled={exportLoading || !exportAllCombined}>
+                  <Download size={16} />
+                  Export Combined
                 </button>
               </div>
               <div className="split-pref-grid">
@@ -2973,6 +3005,7 @@ function App() {
                       <button onClick={() => setExportSplitPlans((current) => {
                         const next = { ...current };
                         delete next[folder.folder];
+                        setExportCombinedGroups([]);
                         return next;
                       })} disabled={!exportSplitPlans[folder.folder]}>
                         Clear Split
@@ -3004,14 +3037,13 @@ function App() {
                     <small>{exportBuckets[split].length} folder(s)</small>
                     <div className="split-folder-list">
                       {exportBuckets[split].map((folder) => (
-                        <button
+                        <div
                           key={folder.folder}
-                          className={exportCombineSelection.includes(folder.folder) ? "split-folder active" : "split-folder"}
-                          onClick={() => toggleExportCombineSelection(folder.folder)}
+                          className="split-folder static"
                         >
                           <span>{folder.folder}</span>
                           <small>{folder.images.length}</small>
-                        </button>
+                        </div>
                       ))}
                     </div>
                   </div>
@@ -3021,7 +3053,7 @@ function App() {
 
             <section className="panel">
               <div className="section-title">Combined Datasets</div>
-              {exportCombinedGroups.length === 0 && <p className="hint">Select folders from the split buckets and combine them here.</p>}
+              {exportCombinedGroups.length === 0 && <p className="hint">Split every folder, then combine all folders for a root-level export.</p>}
               {exportCombinedGroups.map((group) => (
                 <div key={group.id} className="review-group">
                   <strong>{group.name}</strong>

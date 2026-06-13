@@ -31,6 +31,7 @@ export type ExportSplit = "train" | "val" | "test";
 
 export type ExportCocoRequest = {
   root?: string;
+  combined?: boolean;
   splits?: Record<ExportSplit, number[]>;
   folder_splits?: Array<{
     folder: string;

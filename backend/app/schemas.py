@@ -62,6 +62,7 @@ class ExportFolderSplit(BaseModel):
 
 class ExportCocoRequest(BaseModel):
     root: str | None = None
+    combined: bool = False
     splits: dict[Literal["train", "val", "test"], list[int]] | None = None
     folder_splits: list[ExportFolderSplit] = Field(default_factory=list)
 

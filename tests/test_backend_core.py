@@ -12,7 +12,7 @@ from PIL import Image
 from backend.app.annotations import AnnotationService
 from backend.app.bulk_service import BulkJobService
 from backend.app.clip_service import ClipService
-from backend.app.exporter import export_coco, export_workspace_coco
+from backend.app.exporter import export_coco, export_combined_workspace_coco, export_workspace_coco
 from backend.app.masks import load_mask, mask_to_png_data, simple_prompt_mask
 from backend.app.project_service import ProjectService
 from backend.app.qa import validate_project
@@ -180,6 +180,32 @@ class BackendCoreTest(unittest.TestCase):
         self.assertEqual(exported.mask_count, 1)
         self.assertEqual(len(exported.folder_exports), 1)
         self.assertIn("./train", exported.split_coco_jsons)
+
+    def test_combined_workspace_export_writes_to_root(self) -> None:
+        images = self.projects.list_images()
+        service = AnnotationService()
+        mask = simple_prompt_mask(images[0].width, images[0].height)
+        service.create_from_png(self.project, images[0].id, "rice", mask_to_png_data(mask))
+
+        exported = export_combined_workspace_coco(
+            ExportCocoRequest(
+                root=str(self.root),
+                combined=True,
+                folder_splits=[
+                    {
+                        "folder": ".",
+                        "splits": {"train": [images[0].id], "val": [], "test": []},
+                    }
+                ],
+            )
+        )
+
+        export_dir = Path(exported.export_dir)
+        self.assertEqual(export_dir.parent, self.root.resolve())
+        self.assertTrue(export_dir.name.startswith("combined_coco_export_"))
+        train_payload = json.loads(Path(exported.split_coco_jsons["train"]).read_text(encoding="utf-8"))
+        self.assertEqual(len(train_payload["images"]), 1)
+        self.assertEqual(train_payload["images"][0]["split"], "train")
 
     def test_clip_fallback_search(self) -> None:
         clip = ClipService(Path.cwd(), allow_fallback=True)

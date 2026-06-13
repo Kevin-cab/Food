@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from .annotations import AnnotationService
 from .bulk_service import BulkJobService
 from .clip_service import ClipService
-from .exporter import export_coco, export_workspace_coco, scan_export_workspace as scan_export_workspace_helper
+from .exporter import export_coco, export_combined_workspace_coco, export_workspace_coco, scan_export_workspace as scan_export_workspace_helper
 from .project_service import ProjectService
 from .qa import validate_project
 from .schemas import (
@@ -461,6 +461,8 @@ def qa_validate():
 def export(request: ExportCocoRequest | None = Body(default=None)):
     if request and request.root and request.folder_splits:
         try:
+            if request.combined:
+                return export_combined_workspace_coco(request)
             return export_workspace_coco(request)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
