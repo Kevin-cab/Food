@@ -10,10 +10,11 @@ from fastapi.responses import FileResponse
 from .annotations import AnnotationService
 from .bulk_service import BulkJobService
 from .clip_service import ClipService
-from .exporter import export_coco, export_combined_workspace_coco, export_workspace_coco, scan_export_workspace as scan_export_workspace_helper
+from .exporter import export_coco, export_combined_workspace_coco, export_workspace_coco, merge_combined_coco_exports, scan_export_workspace as scan_export_workspace_helper
 from .project_service import ProjectService
 from .qa import validate_project
 from .schemas import (
+    AnnotationBulkClassRenameRequest,
     AnnotationCreateRequest,
     AnnotationUpdateRequest,
     BulkJobCreateRequest,
@@ -22,6 +23,7 @@ from .schemas import (
     ExportCocoRequest,
     ClipSearchRequest,
     MaskReplaceRequest,
+    MergeCombinedExportRequest,
     ProjectOpenRequest,
     PropagateRequest,
     ReviewCandidateOpenResponse,
@@ -158,6 +160,19 @@ def update_annotation(annotation_id: int, request: AnnotationUpdateRequest):
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/annotations/classes/rename")
+def bulk_rename_annotation_class(request: AnnotationBulkClassRenameRequest):
+    try:
+        return annotations.bulk_rename_class(
+            project_or_400(),
+            request.from_category_name,
+            request.to_category_name,
+            request.status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.delete("/api/annotations/{annotation_id}")
@@ -455,6 +470,14 @@ def propagate(request: PropagateRequest):
 @app.get("/api/qa/validate")
 def qa_validate():
     return validate_project(project_or_400())
+
+
+@app.post("/api/export/combined/merge")
+def merge_combined_exports(request: MergeCombinedExportRequest):
+    try:
+        return merge_combined_coco_exports(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/export/coco")

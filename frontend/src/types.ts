@@ -39,6 +39,11 @@ export type ExportCocoRequest = {
   }>;
 };
 
+export type MergeCombinedExportRequest = {
+  output_root: string;
+  export_dirs: string[];
+};
+
 export type ExportCocoResponse = {
   export_dir: string;
   coco_json: string;
@@ -85,6 +90,13 @@ export type AnnotationRecord = {
   status: string;
   score: number | null;
   visible: boolean;
+};
+
+export type AnnotationBulkClassRenameResponse = {
+  from_category_name: string;
+  to_category_name: string;
+  updated: number;
+  status: string;
 };
 
 export type MaskCandidate = {

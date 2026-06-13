@@ -67,6 +67,11 @@ class ExportCocoRequest(BaseModel):
     folder_splits: list[ExportFolderSplit] = Field(default_factory=list)
 
 
+class MergeCombinedExportRequest(BaseModel):
+    output_root: str
+    export_dirs: list[str] = Field(min_length=2)
+
+
 class ImagePage(BaseModel):
     items: list[ImageRecord]
     total: int
@@ -141,6 +146,19 @@ class AnnotationUpdateRequest(BaseModel):
     category_name: str | None = None
     visible: bool | None = None
     status: Literal["accepted", "pending", "rejected"] | None = None
+
+
+class AnnotationBulkClassRenameRequest(BaseModel):
+    from_category_name: str
+    to_category_name: str
+    status: Literal["accepted", "pending", "rejected", "all"] = "accepted"
+
+
+class AnnotationBulkClassRenameResponse(BaseModel):
+    from_category_name: str
+    to_category_name: str
+    updated: int
+    status: str
 
 
 class MaskReplaceRequest(BaseModel):

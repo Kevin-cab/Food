@@ -102,6 +102,7 @@ function App() {
   const [images, setImages] = useState<ImageRecord[]>([]);
   const [imageTotal, setImageTotal] = useState(0);
   const [annotationClassName, setAnnotationClassName] = useState("food");
+  const [bulkClassRenameFrom, setBulkClassRenameFrom] = useState("");
   const [imageFiltersOpen, setImageFiltersOpen] = useState(false);
   const [imageFilenameFilter, setImageFilenameFilter] = useState("");
   const [imageMaskFilter, setImageMaskFilter] = useState<ImageMaskFilter>("all");
@@ -168,6 +169,9 @@ function App() {
   const [exportTrainPercent, setExportTrainPercent] = useState(70);
   const [exportValPercent, setExportValPercent] = useState(15);
   const [exportTestPercent, setExportTestPercent] = useState(15);
+  const [mergeOutputRoot, setMergeOutputRoot] = useState(DEFAULT_EXPORT_ROOT);
+  const [mergeExportDirs, setMergeExportDirs] = useState("");
+  const [mergeResult, setMergeResult] = useState<{ export_dir: string; mask_count: number } | null>(null);
   const [exportProgressMessage, setExportProgressMessage] = useState<string | null>(null);
 
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -1282,6 +1286,37 @@ function App() {
     setStatus(`Renamed object #${annotation.id} to ${name}.`);
   }
 
+  async function bulkRenameSavedClass() {
+    const from = bulkClassRenameFrom.trim();
+    const to = activeClassName;
+    if (!from) {
+      setStatus("Enter the class name you want to replace.");
+      return;
+    }
+    if (!to) {
+      setStatus("Set the Class Name destination first.");
+      return;
+    }
+    if (from === to) {
+      setStatus("Source and destination class names are already the same.");
+      return;
+    }
+    if (!window.confirm(`Rename all accepted saved masks from '${from}' to '${to}'?`)) return;
+    try {
+      const result = await api.bulkRenameAnnotationClass(from, to, "accepted");
+      setAnnotations((items) =>
+        items.map((item) =>
+          item.status === "accepted" && item.category_name === from ? { ...item, category_name: to } : item
+        )
+      );
+      if (currentImage) await refreshAnnotations(currentImage.id);
+      await refreshFilteredImageList(currentImage?.id ?? null);
+      setStatus(`Renamed ${result.updated} accepted saved mask(s) from ${result.from_category_name} to ${result.to_category_name}.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Bulk class rename failed.");
+    }
+  }
+
   async function renameReviewCandidate(candidate: ReviewCandidateRecord, value: string) {
     const name = value.trim() || "food";
     if (name === candidate.category_name) return;
@@ -1886,6 +1921,34 @@ function App() {
     }
   }
 
+  async function runMergeCombinedExports() {
+    const exportDirs = mergeExportDirs
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (!mergeOutputRoot.trim()) {
+      setStatus("Choose an output root for the merged combined export.");
+      return;
+    }
+    if (exportDirs.length < 2) {
+      setStatus("Paste at least two combined export folders, one per line.");
+      return;
+    }
+    setMergeResult(null);
+    setStatus("Merging combined exports...");
+    setExportProgressMessage("Merging combined exports...");
+    try {
+      const result = await api.mergeCombinedExports({ output_root: mergeOutputRoot.trim(), export_dirs: exportDirs });
+      setMergeResult({ export_dir: result.export_dir, mask_count: result.mask_count });
+      const splitFiles = Object.keys(result.split_coco_jsons ?? {}).length;
+      setStatus(`Merged ${exportDirs.length} combined export folder(s) with ${result.mask_count} masks into ${splitFiles || 1} COCO file(s) at ${result.export_dir}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Merge combined exports failed.");
+    } finally {
+      setExportProgressMessage(null);
+    }
+  }
+
   async function runQa() {
     const issues = await api.validate();
     setStatus(issues.length ? `${issues.length} QA issues. First: ${issues[0].message}` : "QA passed.");
@@ -2457,6 +2520,18 @@ function App() {
               placeholder="Class name for new masks"
             />
           </label>
+          <div className="class-bulk-rename">
+            <div className="section-title mini">Bulk Rename Saved Class</div>
+            <div className="input-action-row">
+              <input
+                value={bulkClassRenameFrom}
+                onChange={(event) => setBulkClassRenameFrom(event.target.value)}
+                placeholder="From class, e.g. dog"
+              />
+              <button onClick={bulkRenameSavedClass} disabled={!project || !bulkClassRenameFrom.trim()}>To Class</button>
+            </div>
+            <p className="hint">Renames accepted saved masks to the Class Name above.</p>
+          </div>
           <button className="panel-action" onClick={() => setImageFiltersOpen((open) => !open)}>
             {imageFiltersOpen ? "Hide Image Filters" : "Show Image Filters"}{hasImageFilters ? " *" : ""}
           </button>
@@ -3076,6 +3151,33 @@ function App() {
                   </div>
                 </div>
               ))}
+            </section>
+
+            <section className="panel">
+              <div className="section-title">Merge Combined Exports</div>
+              <p className="hint">Paste completed combined export folders from multiple annotators. Existing train/val/test splits are preserved.</p>
+              <label className="field-label stacked-field">
+                Merge Output Root
+                <input value={mergeOutputRoot} onChange={(event) => setMergeOutputRoot(event.target.value)} />
+              </label>
+              <label className="field-label stacked-field">
+                Combined Export Folders
+                <textarea
+                  value={mergeExportDirs}
+                  onChange={(event) => setMergeExportDirs(event.target.value)}
+                  placeholder={"C:\\path\\combined_coco_export_...\nD:\\path\\combined_coco_export_..."}
+                  rows={5}
+                />
+              </label>
+              <button className="panel-action" onClick={runMergeCombinedExports} disabled={exportLoading || Boolean(exportProgressMessage)}>
+                <Download size={16} />
+                Merge Combined Exports
+              </button>
+              {mergeResult && (
+                <p className="hint">
+                  Merged {mergeResult.mask_count} masks at {mergeResult.export_dir}
+                </p>
+              )}
             </section>
           </>
         )}

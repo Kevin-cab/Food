@@ -12,7 +12,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -42,13 +43,21 @@ button:disabled {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   min-height: 34px;
   border: 1px solid #c9cfc4;
   border-radius: 6px;
   padding: 0 10px;
   background: #fff;
+}
+
+textarea {
+  min-height: 104px;
+  padding: 8px 10px;
+  resize: vertical;
+  user-select: text;
 }
 
 .app {
@@ -345,6 +354,32 @@ small {
   color: #4e5a4d;
   font-size: 13px;
   font-weight: 650;
+}
+
+.field-label.stacked-field {
+  display: grid;
+  align-items: stretch;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.class-bulk-rename {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid #d8ddd1;
+  border-radius: 6px;
+  background: #fbfcf7;
+}
+
+.section-title.mini {
+  margin: 0;
+  font-size: 12px;
+}
+
+.class-bulk-rename .hint {
+  margin: 0;
 }
 
 .image-filters {

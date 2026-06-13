@@ -1,4 +1,4 @@
-import type { AnnotationRecord, BulkJobRecord, BulkMode, ClipStatus, ExportCocoRequest, ExportCocoResponse, ExportWorkspaceResponse, ImageCountOperator, ImageMaskFilter, ImagePage, MaskCandidate, ProjectIndexStatus, ReviewCandidateRecord, SearchResult } from "./types";
+import type { AnnotationBulkClassRenameResponse, AnnotationRecord, BulkJobRecord, BulkMode, ClipStatus, ExportCocoRequest, ExportCocoResponse, ExportWorkspaceResponse, ImageCountOperator, ImageMaskFilter, ImagePage, MaskCandidate, MergeCombinedExportRequest, ProjectIndexStatus, ReviewCandidateRecord, SearchResult } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -75,6 +75,11 @@ export const api = {
     request<AnnotationRecord>(`/api/annotations/${id}`, {
       method: "PATCH",
       body: JSON.stringify(changes)
+    }),
+  bulkRenameAnnotationClass: (fromCategoryName: string, toCategoryName: string, status = "accepted") =>
+    request<AnnotationBulkClassRenameResponse>("/api/annotations/classes/rename", {
+      method: "POST",
+      body: JSON.stringify({ from_category_name: fromCategoryName, to_category_name: toCategoryName, status })
     }),
   deleteAnnotation: (id: number) =>
     request<{ deleted: number }>(`/api/annotations/${id}`, { method: "DELETE" }),
@@ -173,5 +178,10 @@ export const api = {
     request<ExportCocoResponse>("/api/export/coco", {
       method: "POST",
       body: JSON.stringify(payload ?? {})
+    }),
+  mergeCombinedExports: (payload: MergeCombinedExportRequest) =>
+    request<ExportCocoResponse>("/api/export/combined/merge", {
+      method: "POST",
+      body: JSON.stringify(payload)
     })
 };

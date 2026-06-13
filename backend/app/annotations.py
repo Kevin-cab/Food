@@ -121,6 +121,44 @@ class AnnotationService:
                 )
         return self.get(project, annotation_id)
 
+    def bulk_rename_class(
+        self,
+        project: ProjectDb,
+        from_category_name: str,
+        to_category_name: str,
+        status: str = "accepted",
+    ) -> dict[str, object]:
+        source = from_category_name.strip()
+        target = to_category_name.strip()
+        if not source:
+            raise ValueError("Source class name is required")
+        if not target:
+            raise ValueError("Target class name is required")
+        with project.connect() as conn:
+            source_row = conn.execute("SELECT id FROM categories WHERE name=?", (source,)).fetchone()
+            if source_row is None:
+                return {"from_category_name": source, "to_category_name": target, "updated": 0, "status": status}
+            target_id = get_or_create_category(conn, target)
+            if status == "all":
+                cur = conn.execute(
+                    """
+                    UPDATE annotations
+                    SET category_id=?, updated_at=CURRENT_TIMESTAMP
+                    WHERE category_id=?
+                    """,
+                    (target_id, int(source_row["id"])),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE annotations
+                    SET category_id=?, updated_at=CURRENT_TIMESTAMP
+                    WHERE category_id=? AND status=?
+                    """,
+                    (target_id, int(source_row["id"]), status),
+                )
+        return {"from_category_name": source, "to_category_name": target, "updated": int(cur.rowcount), "status": status}
+
     def delete(self, project: ProjectDb, annotation_id: int) -> None:
         ann = self.get(project, annotation_id)
         mask_paths = [ann.mask_path]

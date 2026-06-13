@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import csv
 from datetime import datetime
@@ -13,7 +14,7 @@ from PIL import Image
 from .db import ProjectDb, parse_bbox
 from .masks import load_mask
 from .qa import validate_project
-from .schemas import ExportCocoRequest, ExportResponse, ExportWorkspaceFolderRecord, ExportWorkspaceImageRecord, ExportWorkspaceResponse
+from .schemas import ExportCocoRequest, ExportResponse, ExportWorkspaceFolderRecord, ExportWorkspaceImageRecord, ExportWorkspaceResponse, MergeCombinedExportRequest, QaIssue
 
 
 def mask_to_polygons(mask: np.ndarray) -> list[list[float]]:
@@ -29,6 +30,78 @@ def mask_to_polygons(mask: np.ndarray) -> list[list[float]]:
 
 
 SPLITS = ("train", "val", "test")
+
+
+GENERIC_CATEGORY_NAMES = {"food", "object", "objects", "mask", "candidate", "unknown", "label"}
+CATEGORY_NAME_ALIASES = {
+    "chinese pick": "chinese pickled cucumber",
+    "fried eel noo": "fried eel noodles",
+    "ginger d": "ginger duck stew",
+    "milkish": "milkfish belly congee",
+    "milkish belly congee": "milkfish belly congee",
+    "pig s blood soup": "pig_blood_soup",
+    "pigs blood soup": "pig_blood_soup",
+    "pig's blood soup": "pig_blood_soup",
+}
+CONTEXT_NAME_ALIASES = {
+    "pig s blood soup": "pig_blood_soup",
+    "pigs blood soup": "pig_blood_soup",
+    "pig's blood soup": "pig_blood_soup",
+    "milkfish belly congee": "milkfish belly congee",
+}
+
+
+def _category_key(value: str | None) -> str:
+    clean = (value or "").strip().lower().replace("_", " ").replace("-", " ")
+    clean = re.sub(r"[^a-z0-9']+", " ", clean)
+    return re.sub(r"\s+", " ", clean).strip()
+
+
+def _canonical_context_category(value: str | None) -> str | None:
+    key = _category_key(value)
+    if not key:
+        return None
+    return CONTEXT_NAME_ALIASES.get(key, key.replace(" ", "_"))
+
+
+def _context_category_from_folder(folder: str, project_root: Path) -> str | None:
+    normalized = _normalize_export_relpath(folder)
+    parts = [part for part in normalized.split("/") if part and part != "."]
+    candidates = [parts[-1]] if parts else []
+    for candidate in candidates:
+        context = _canonical_context_category(candidate)
+        if context:
+            return context
+    return None
+
+
+def _context_category_from_image_rel(image_rel: str) -> str | None:
+    stem = Path(_normalize_export_relpath(image_rel)).stem
+    stem = re.sub(r"_\d+$", "", stem)
+    return _canonical_context_category(stem)
+
+
+def _canonical_category_name(name: str | None, context_category: str | None = None) -> tuple[str, bool]:
+    clean = (name or "").strip() or "food"
+    key = _category_key(clean)
+    context_key = _category_key(context_category)
+    if key in CATEGORY_NAME_ALIASES:
+        return CATEGORY_NAME_ALIASES[key], True
+    if context_category and key in GENERIC_CATEGORY_NAMES:
+        return context_category, _category_key(clean) != context_key
+    if context_category and key and context_key and context_key.startswith(key) and len(key) >= 6:
+        return context_category, _category_key(clean) != context_key
+    return clean, False
+
+
+def _category_correction_issue(original: str, corrected: str, context: str | None, annotation_id: int | None = None) -> QaIssue:
+    context_text = f" using context '{context}'" if context else ""
+    return QaIssue(
+        severity="warning",
+        code="category_name_corrected",
+        message=f"Corrected export category '{original}' to '{corrected}'{context_text}",
+        annotation_id=annotation_id,
+    )
 
 
 def export_coco(project: ProjectDb, request: ExportCocoRequest | None = None) -> ExportResponse:
@@ -251,14 +324,20 @@ def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse
             ]
 
         project_category_names = {int(category["id"]): str(category["name"]) for category in project_categories}
+        folder_context_category = _context_category_from_folder(folder_split.folder, project_root)
         category_map: dict[int, int] = {}
+        corrected_project_categories: set[int] = set()
 
-        def combined_category_id(source_category_id: int) -> int:
+        def combined_category_id(source_category_id: int, annotation_id: int | None = None) -> int:
             if source_category_id <= 0:
                 return 0
-            name = project_category_names.get(source_category_id)
-            if not name:
+            raw_name = project_category_names.get(source_category_id)
+            if not raw_name:
                 return 0
+            name, corrected = _canonical_category_name(raw_name, folder_context_category)
+            if corrected and source_category_id not in corrected_project_categories:
+                corrected_project_categories.add(source_category_id)
+                issues.append(_category_correction_issue(raw_name, name, folder_context_category, annotation_id))
             if name not in categories_by_name:
                 categories_by_name[name] = len(categories_by_name) + 1
                 categories.append({"id": categories_by_name[name], "name": name})
@@ -315,7 +394,7 @@ def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse
             dst = dst_dir / f"{folder_slug}_{ann['id']}.png"
             shutil.copy2(mask_abs, dst)
             category_id = int(ann["category_id"]) if ann["category_id"] else 0
-            category_id = combined_category_id(category_id)
+            category_id = combined_category_id(category_id, int(ann["id"]))
             mask_rel = str(dst.relative_to(export_dir)).replace("\\", "/")
             new_annotation = {
                 "id": next_annotation_id,
@@ -346,7 +425,7 @@ def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse
                     continue
                 mask = load_mask(mask_abs)
                 category_id = int(ann["category_id"]) if ann["category_id"] else 0
-                color = _color_for_id(category_map.get(category_id, combined_category_id(category_id)))
+                color = _color_for_id(category_map.get(category_id, combined_category_id(category_id, int(ann["id"]))))
                 semantic[mask] = color
             split = str(new_image["split"])
             dst_dir = semantic_dir / split
@@ -409,6 +488,225 @@ def export_combined_workspace_coco(request: ExportCocoRequest) -> ExportResponse
     )
 
 
+def merge_combined_coco_exports(request: MergeCombinedExportRequest) -> ExportResponse:
+    output_root = Path(request.output_root).expanduser().resolve()
+    if not output_root.exists() or not output_root.is_dir():
+        raise ValueError(f"Merge output root does not exist: {output_root}")
+
+    export_dirs = [Path(item.strip().strip('"').strip("'")).expanduser().resolve() for item in request.export_dirs if item.strip()]
+    if len(export_dirs) < 2:
+        raise ValueError("At least two combined export folders are required")
+
+    sources = []
+    seen_images: dict[str, Path] = {}
+    for export_dir in export_dirs:
+        if not export_dir.exists() or not export_dir.is_dir():
+            raise ValueError(f"Combined export folder does not exist: {export_dir}")
+        coco_path = export_dir / "annotations_coco.json"
+        if not coco_path.exists():
+            raise ValueError(f"Combined export is missing annotations_coco.json: {export_dir}")
+        payload = json.loads(coco_path.read_text(encoding="utf-8"))
+        images = [dict(image) for image in payload.get("images", [])]
+        annotations = [dict(annotation) for annotation in payload.get("annotations", [])]
+        categories = [dict(category) for category in payload.get("categories", [])]
+        split_by_image = _split_map_from_payload(payload)
+        image_splits: dict[int, str] = {}
+        for image in images:
+            image_id = int(image["id"])
+            image_rel = _normalize_export_relpath(str(image.get("file_name", "")))
+            if not image_rel:
+                raise ValueError(f"Image {image_id} in {export_dir} has no file_name")
+            if image_rel in seen_images:
+                raise ValueError(f"Duplicate image path '{image_rel}' in {export_dir} and {seen_images[image_rel]}")
+            if not (export_dir / image_rel).exists():
+                raise ValueError(f"Image file is missing: {export_dir / image_rel}")
+            split = _split_for_export_image(image, split_by_image)
+            image_splits[image_id] = split
+            seen_images[image_rel] = export_dir
+        sources.append(
+            {
+                "dir": export_dir,
+                "slug": _safe_export_name(export_dir.name),
+                "payload": payload,
+                "images": images,
+                "annotations": annotations,
+                "categories": categories,
+                "image_splits": image_splits,
+            }
+        )
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    export_dir = output_root / f"merged_combined_coco_export_{timestamp}"
+    images_dir = export_dir / "images"
+    masks_dir = export_dir / "masks"
+    semantic_dir = export_dir / "semantic_rgb"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    masks_dir.mkdir(parents=True, exist_ok=True)
+    semantic_dir.mkdir(parents=True, exist_ok=True)
+
+    categories_by_name: dict[str, int] = {}
+    categories: list[dict] = []
+    images: list[dict] = []
+    annotations: list[dict] = []
+    polygon_sidecar: list[dict] = []
+    manifest_rows: list[dict] = []
+    split_image_ids: dict[str, list[int]] = {split: [] for split in SPLITS}
+    semantic_masks: dict[int, list[tuple[Path, int]]] = {}
+    image_by_new_id: dict[int, dict] = {}
+    image_rel_by_new_id: dict[int, str] = {}
+    mask_paths_by_image: dict[int, list[str]] = {}
+    next_image_id = 1
+    next_annotation_id = 1
+    mask_count = 0
+
+    for source_index, source in enumerate(sources, start=1):
+        export_source = source["dir"]
+        source_slug = source["slug"] or f"source_{source_index}"
+        category_names = {int(category["id"]): str(category.get("name", "")) for category in source["categories"]}
+        category_map: dict[tuple[int, str | None], int] = {}
+
+        def merged_category_id(source_category_id: int, context_category: str | None = None) -> int:
+            if source_category_id <= 0:
+                return 0
+            raw_name = category_names.get(source_category_id)
+            if not raw_name:
+                return 0
+            name, _corrected = _canonical_category_name(raw_name, context_category)
+            if name not in categories_by_name:
+                categories_by_name[name] = len(categories_by_name) + 1
+                categories.append({"id": categories_by_name[name], "name": name})
+            category_map[(source_category_id, context_category)] = categories_by_name[name]
+            return categories_by_name[name]
+
+        image_id_map: dict[int, int] = {}
+        for image in source["images"]:
+            old_image_id = int(image["id"])
+            split = source["image_splits"][old_image_id]
+            image_rel = _normalize_export_relpath(str(image["file_name"]))
+            src_image = export_source / image_rel
+            dst_image = export_dir / image_rel
+            dst_image.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_image, dst_image)
+            new_image = {
+                **image,
+                "id": next_image_id,
+                "file_name": image_rel,
+                "split": split,
+                "source_export": export_source.name,
+                "source_image_id": old_image_id,
+            }
+            images.append(new_image)
+            image_id_map[old_image_id] = next_image_id
+            image_by_new_id[next_image_id] = new_image
+            image_rel_by_new_id[next_image_id] = image_rel
+            split_image_ids[split].append(next_image_id)
+            next_image_id += 1
+
+        for annotation in source["annotations"]:
+            old_image_id = int(annotation["image_id"])
+            new_image_id = image_id_map.get(old_image_id)
+            if not new_image_id:
+                continue
+            split = str(image_by_new_id[new_image_id]["split"])
+            source_mask_rel = _normalize_export_relpath(str(annotation.get("mask_path", "")))
+            if not source_mask_rel:
+                raise ValueError(f"Annotation {annotation.get('id')} in {export_source} has no mask_path")
+            source_mask = export_source / source_mask_rel
+            if not source_mask.exists():
+                raise ValueError(f"Mask file is missing: {source_mask}")
+            mask_suffix = source_mask.suffix or ".png"
+            mask_name = f"{source_slug}_{annotation['id']}{mask_suffix}"
+            mask_rel = _unique_relative_path(export_dir, f"masks/{split}/{mask_name}")
+            dst_mask = export_dir / mask_rel
+            dst_mask.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_mask, dst_mask)
+            source_category_id = int(annotation["category_id"] or 0)
+            context_category = _context_category_from_image_rel(str(image_by_new_id[new_image_id].get("file_name", "")))
+            category_id = merged_category_id(source_category_id, context_category)
+            new_annotation = {
+                **annotation,
+                "id": next_annotation_id,
+                "image_id": new_image_id,
+                "category_id": category_id,
+                "mask_path": mask_rel,
+                "source_export": export_source.name,
+                "source_annotation_id": int(annotation["id"]),
+                "split": split,
+            }
+            annotations.append(new_annotation)
+            polygon_sidecar.append({"annotation_id": next_annotation_id, "polygons": annotation.get("segmentation", [])})
+            semantic_masks.setdefault(new_image_id, []).append((dst_mask, category_id))
+            mask_paths_by_image.setdefault(new_image_id, []).append(mask_rel)
+            next_annotation_id += 1
+            mask_count += 1
+
+    for image in images:
+        image_id = int(image["id"])
+        split = str(image["split"])
+        semantic = np.zeros((int(image["height"]), int(image["width"]), 3), dtype=np.uint8)
+        for mask_path, category_id in semantic_masks.get(image_id, []):
+            mask = load_mask(mask_path)
+            semantic[mask] = _color_for_id(category_id)
+        image_stem = Path(str(image["file_name"])).stem
+        semantic_rel = _unique_relative_path(export_dir, f"semantic_rgb/{split}/{image_stem}.png")
+        semantic_path = export_dir / semantic_rel
+        semantic_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(semantic, mode="RGB").save(semantic_path)
+        manifest_rows.append(
+            {
+                "image_path": image_rel_by_new_id[image_id],
+                "masks": ";".join(mask_paths_by_image.get(image_id, [])),
+                "semantic_rgb": semantic_rel,
+                "split": split,
+            }
+        )
+
+    payload = {
+        "info": {
+            "description": "FoodSegmentation merged combined export",
+            "version": timestamp,
+            "date_created": datetime.now().isoformat(timespec="seconds"),
+            "source_exports": [str(source["dir"]) for source in sources],
+        },
+        "images": images,
+        "categories": categories,
+        "annotations": annotations,
+        "splits": {split: sorted(ids) for split, ids in split_image_ids.items()},
+    }
+    coco_path = export_dir / "annotations_coco.json"
+    polygon_path = export_dir / "polygons.json"
+    qa_path = export_dir / "qa_report.json"
+    manifest_path = export_dir / "manifest.csv"
+    labels_path = export_dir / "labels.json"
+    coco_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    split_coco_jsons = {}
+    for split in SPLITS:
+        ids = set(split_image_ids[split])
+        split_payload = {
+            **payload,
+            "images": [image for image in images if int(image["id"]) in ids],
+            "annotations": [ann for ann in annotations if int(ann["image_id"]) in ids],
+        }
+        split_path = export_dir / f"annotations_{split}_coco.json"
+        split_path.write_text(json.dumps(split_payload, indent=2), encoding="utf-8")
+        split_coco_jsons[split] = str(split_path)
+    polygon_path.write_text(json.dumps(polygon_sidecar, indent=2), encoding="utf-8")
+    qa_path.write_text(json.dumps([], indent=2), encoding="utf-8")
+    labels_path.write_text(json.dumps(_labels_payload(categories), indent=2), encoding="utf-8")
+    with manifest_path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=["image_path", "masks", "semantic_rgb", "split"])
+        writer.writeheader()
+        writer.writerows(manifest_rows)
+
+    return ExportResponse(
+        export_dir=str(export_dir),
+        coco_json=str(coco_path),
+        mask_count=mask_count,
+        issues=[],
+        split_coco_jsons=split_coco_jsons,
+    )
+
+
 def _resolve_export_folder(root: Path, folder: str) -> Path:
     project_root = (root / folder).resolve()
     try:
@@ -434,6 +732,46 @@ def _labels_payload(categories: list[dict]) -> dict[str, dict]:
             "color": list(_color_for_id(category_id)),
         }
     return labels
+
+
+def _normalize_export_relpath(value: str) -> str:
+    return value.strip().replace("\\", "/").lstrip("/")
+
+
+def _split_map_from_payload(payload: dict) -> dict[int, str]:
+    split_by_image: dict[int, str] = {}
+    for split in SPLITS:
+        for image_id in payload.get("splits", {}).get(split, []):
+            split_by_image[int(image_id)] = split
+    return split_by_image
+
+
+def _split_for_export_image(image: dict, split_by_image: dict[int, str]) -> str:
+    image_id = int(image["id"])
+    split = image.get("split") or split_by_image.get(image_id)
+    if not split:
+        parts = _normalize_export_relpath(str(image.get("file_name", ""))).split("/")
+        if len(parts) >= 3 and parts[0] == "images" and parts[1] in SPLITS:
+            split = parts[1]
+    if split not in SPLITS:
+        raise ValueError(f"Image {image_id} has no valid train/val/test split")
+    return str(split)
+
+
+def _unique_relative_path(export_dir: Path, rel_path: str) -> str:
+    rel = _normalize_export_relpath(rel_path)
+    candidate = export_dir / rel
+    if not candidate.exists():
+        return rel
+    parent = Path(rel).parent
+    stem = Path(rel).stem
+    suffix = Path(rel).suffix
+    index = 2
+    while True:
+        next_rel = str(parent / f"{stem}_{index}{suffix}").replace("\\", "/")
+        if not (export_dir / next_rel).exists():
+            return next_rel
+        index += 1
 
 
 def _split_by_image(request: ExportCocoRequest | None) -> dict[int, str]:
