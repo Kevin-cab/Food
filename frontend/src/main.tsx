@@ -399,6 +399,11 @@ function App() {
         void runTextPrompt();
         return;
       }
+      if (key === "h" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        if (selectedCandidateObj) void acceptSelectedCandidate();
+        return;
+      }
       if (key === "r" && !event.ctrlKey && !event.metaKey && !event.altKey) {
         event.preventDefault();
         setTool("point_pos");
@@ -2927,7 +2932,7 @@ function App() {
             <Wand2 size={18} />
           </button>
           {selectedCandidateObj && (
-            <button onClick={acceptSelectedCandidate} title="Save selected candidate as object">
+            <button onClick={acceptSelectedCandidate} title="Save selected candidate as object (H)">
               <Check size={16} />
               Accept Selected
             </button>
