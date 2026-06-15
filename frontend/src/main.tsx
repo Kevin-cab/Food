@@ -25,7 +25,7 @@ import "./styles.css";
 
 type Point = { x: number; y: number };
 type PromptPoint = Point & { label: 0 | 1 };
-type Candidate = MaskCandidate & { localId: number; imageId: number; name: string; visible: boolean; reviewCandidateId?: number };
+type Candidate = MaskCandidate & { localId: number; imageId: number; name: string; visible: boolean; reviewCandidateId?: number; promptPoints?: PromptPoint[] };
 type ExportSplitPlan = {
   train: ImageRecord[];
   val: ImageRecord[];
@@ -139,6 +139,7 @@ function App() {
   const [bulkTopK, setBulkTopK] = useState(3);
   const [bulkMaxImages, setBulkMaxImages] = useState(50);
   const [promptFilterMode, setPromptFilterMode] = useState<CandidateFilterMode>("top_k");
+  const [pointPromptMode, setPointPromptMode] = useState<"refine" | "new_candidate">("refine");
   const [promptThreshold, setPromptThreshold] = useState(0.3);
   const [promptTopK, setPromptTopK] = useState(5);
   const [clipStatus, setClipStatus] = useState<ClipStatus | null>(null);
@@ -176,6 +177,9 @@ function App() {
 
   const stageRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const brushPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const brushPreviewFrameRef = useRef<number | null>(null);
+  const lastBrushPointRef = useRef<Point | null>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const renderSeqRef = useRef(0);
@@ -184,6 +188,7 @@ function App() {
   const activeImageIdRef = useRef<number | null>(null);
   const promptPointsRef = useRef<PromptPoint[]>([]);
   const editMaskDataRef = useRef<string | null>(null);
+  const editingTargetRef = useRef<"candidate" | "annotation" | null>(null);
   const panStartRef = useRef<Point | null>(null);
   const loadingReviewCandidateIdsRef = useRef<Set<number>>(new Set());
   const imageListDirtyRef = useRef<Set<number>>(new Set());
@@ -195,8 +200,8 @@ function App() {
   const selectedAnnotationObj = annotations.find((annotation) => annotation.id === selectedAnnotation) ?? null;
   const activeClassName = annotationClassName.trim() || "food";
   const viewportScale = fitScale * zoom;
-  const canUndo = undoKinds.length > 0 || candidateHistory.length > 0 || editorHistory.length > 0 || Boolean(selectedAnnotation);
-  const canRedo = redoKinds.length > 0 || Boolean(selectedAnnotation);
+  const canUndo = undoKinds.length > 0 || candidateHistory.length > 0 || editorHistory.length > 0;
+  const canRedo = redoKinds.length > 0;
   const imageFilterKey = useMemo(
     () => JSON.stringify({ q: imageFilenameFilter.trim(), mask: imageMaskFilter, cls: imageClassFilter.trim(), op: imageCountOp, count: imageCountValue.trim() }),
     [imageFilenameFilter, imageMaskFilter, imageClassFilter, imageCountOp, imageCountValue]
@@ -331,6 +336,7 @@ function App() {
     setSelectedAnnotation(null);
     setEditMaskData(null);
     clearMaskCanvas(currentImage.width, currentImage.height);
+    clearBrushPreview(currentImage.width, currentImage.height);
     resetViewport();
     refreshAnnotations(currentImage.id);
     clearCandidates(true);
@@ -356,6 +362,10 @@ function App() {
   useEffect(() => {
     editMaskDataRef.current = editMaskData;
   }, [editMaskData]);
+
+  useEffect(() => {
+    editingTargetRef.current = editingTarget;
+  }, [editingTarget]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -389,6 +399,18 @@ function App() {
         void runTextPrompt();
         return;
       }
+      if (key === "r" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        setPointPromptMode("refine");
+        setStatus("Point mode: refine selected candidate.");
+        return;
+      }
+      if (key === "t" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        setPointPromptMode("new_candidate");
+        setStatus("Point mode: new candidate per click.");
+        return;
+      }
       if (key === "d" && !event.ctrlKey && !event.metaKey && !event.altKey) {
         event.preventDefault();
         goPreviousImage();
@@ -419,6 +441,7 @@ function App() {
     selectedAnnotation,
     promptPoints,
     polygonPoints,
+    pointPromptMode,
     currentImage?.id
   ]);
 
@@ -749,10 +772,24 @@ function App() {
   }
 
   function restoreWorkState(state: WorkState) {
+    renderSeqRef.current += 1;
+    clearOverlayCanvas(currentImage?.width, currentImage?.height);
     setCandidates(state.candidates);
     setSelectedCandidate(state.selectedCandidate);
     setPromptPoints(state.promptPoints);
     setPolygonPoints(state.polygonPoints);
+    clearBrushPreview(currentImage?.width, currentImage?.height);
+    const restoredCandidate = state.candidates.find((candidate) => candidate.localId === state.selectedCandidate);
+    if (restoredCandidate) {
+      setSelectedAnnotation(null);
+      setEditMaskData(restoredCandidate.mask_png);
+      hydrateMaskCanvas(restoredCandidate.mask_png);
+      return;
+    }
+    setEditMaskData(null);
+    const maskCanvas = maskCanvasRef.current;
+    const ctx = maskCanvas?.getContext("2d");
+    if (maskCanvas && ctx) ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
   }
 
   function recordEditorAction(action: EditorAction) {
@@ -761,6 +798,35 @@ function App() {
     setCandidateRedo([]);
     setUndoKinds((items) => [...items, "editor"]);
     setRedoKinds([]);
+  }
+
+  async function loadAnnotationMaskIntoEditor(annotationId: number) {
+    const response = await fetch(annotationMaskUrl(annotationId, projectKey));
+    const blob = await response.blob();
+    const dataUrl = await blobToDataUrl(blob);
+    setEditMaskData(dataUrl);
+    setAnnotationMasks((previous) => ({ ...previous, [annotationId]: dataUrl }));
+    hydrateMaskCanvas(dataUrl);
+  }
+
+  function recordSavedObjectMaskEdit(annotationId: number, imageId: number, label: string) {
+    recordEditorAction({
+      label,
+      undo: async () => {
+        await api.undoAnnotation(annotationId);
+        setSelectedAnnotation(annotationId);
+        setSelectedCandidate(null);
+        await refreshAnnotations(imageId);
+        await loadAnnotationMaskIntoEditor(annotationId);
+      },
+      redo: async () => {
+        await api.redoAnnotation(annotationId);
+        setSelectedAnnotation(annotationId);
+        setSelectedCandidate(null);
+        await refreshAnnotations(imageId);
+        await loadAnnotationMaskIntoEditor(annotationId);
+      }
+    });
   }
 
   async function deleteAnnotationLocal(id: number) {
@@ -791,17 +857,34 @@ function App() {
     return { ...restored, visible: snapshot.visible };
   }
 
-  function setNewCandidates(raw: MaskCandidate[], source: string) {
+  function setNewCandidates(raw: MaskCandidate[], source: string, sourcePoints: PromptPoint[] = []) {
     const next = raw.map((candidate, index) => ({
       ...candidate,
       localId: Date.now() + index,
       imageId: currentImage?.id ?? 0,
       name: activeClassName,
-      visible: true
+      visible: true,
+      promptPoints: source === "point" ? sourcePoints : undefined
     }));
     setCandidates(next);
     setSelectedCandidate(next[0]?.localId ?? null);
     setSelectedAnnotation(null);
+  }
+
+  function appendNewCandidates(raw: MaskCandidate[], source: string, sourcePoints: PromptPoint[] = []) {
+    const baseId = Date.now();
+    const next = raw.map((candidate, index) => ({
+      ...candidate,
+      localId: baseId + index,
+      imageId: currentImage?.id ?? 0,
+      name: activeClassName,
+      visible: true,
+      promptPoints: source === "point" ? sourcePoints : undefined
+    }));
+    setCandidates((items) => [...items, ...next]);
+    setSelectedCandidate(next[0]?.localId ?? null);
+    setSelectedAnnotation(null);
+    return next;
   }
 
   function filterPromptCandidates(raw: MaskCandidate[]) {
@@ -868,6 +951,56 @@ function App() {
     ctx?.clearRect(0, 0, canvas.width, canvas.height);
   }
 
+  function clearBrushPreview(width?: number, height?: number) {
+    if (brushPreviewFrameRef.current !== null) {
+      window.cancelAnimationFrame(brushPreviewFrameRef.current);
+      brushPreviewFrameRef.current = null;
+    }
+    const canvas = brushPreviewCanvasRef.current;
+    if (!canvas) return;
+    if (width && height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const ctx = canvas.getContext("2d");
+    ctx?.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  function scheduleBrushPreview() {
+    if (brushPreviewFrameRef.current !== null) return;
+    brushPreviewFrameRef.current = window.requestAnimationFrame(() => {
+      brushPreviewFrameRef.current = null;
+      renderBrushPreview();
+    });
+  }
+
+  function renderBrushPreview() {
+    if (!currentImage) return;
+    const maskCanvas = maskCanvasRef.current;
+    const previewCanvas = brushPreviewCanvasRef.current;
+    if (!maskCanvas || !previewCanvas) return;
+    if (previewCanvas.width !== currentImage.width || previewCanvas.height !== currentImage.height) {
+      previewCanvas.width = currentImage.width;
+      previewCanvas.height = currentImage.height;
+    }
+    const sourceCtx = maskCanvas.getContext("2d");
+    const previewCtx = previewCanvas.getContext("2d");
+    if (!sourceCtx || !previewCtx) return;
+    const pixels = sourceCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+    const overlay = previewCtx.createImageData(pixels.width, pixels.height);
+    const color = editingTargetRef.current === "annotation" ? [56, 116, 214, 118] : [36, 211, 154, 110];
+    for (let i = 0; i < pixels.data.length; i += 4) {
+      if (isMaskPixel(pixels.data, i)) {
+        overlay.data[i] = color[0];
+        overlay.data[i + 1] = color[1];
+        overlay.data[i + 2] = color[2];
+        overlay.data[i + 3] = color[3];
+      }
+    }
+    previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+    previewCtx.putImageData(overlay, 0, 0);
+  }
+
   function canvasPoint(evt: React.MouseEvent) {
     const img = imageRef.current;
     if (!img || !currentImage) return null;
@@ -880,17 +1013,11 @@ function App() {
     return { x: Math.max(0, Math.min(currentImage.width, x)), y: Math.max(0, Math.min(currentImage.height, y)) };
   }
 
-  async function runPoint(point: Point, label: 0 | 1) {
+  async function runStandalonePointCandidate(point: Point, label: 0 | 1) {
     if (!currentImage) return;
-    const nextPoints = [...promptPoints, { ...point, label }];
-    pushCandidateHistory();
-    await runPointSet(nextPoints);
-  }
-
-  async function runPointSet(nextPoints: PromptPoint[]) {
-    if (!currentImage) return;
+    const nextPoints = [{ ...point, label }];
     setPromptPoints(nextPoints);
-    setStatus("Running SAM with point set...");
+    setStatus("Running SAM for a new point candidate...");
     const res = await api.samPrompt({
       image_id: currentImage.id,
       prompt_type: "point",
@@ -899,7 +1026,65 @@ function App() {
       accept: false
     });
     const filtered = filterPromptCandidates(res.candidates);
-    setNewCandidates(filtered, "point");
+    const added = appendNewCandidates(filtered, "point", nextPoints);
+    setStatus(res.sam_error ? `SAM failed: ${res.sam_error}` : added.length ? `Added ${added.length} new point candidate(s).` : "SAM returned no masks.");
+  }
+
+  async function runPoint(point: Point, label: 0 | 1) {
+    if (!currentImage) return;
+    pushCandidateHistory();
+    if (pointPromptMode === "new_candidate" && label === 1) {
+      await runStandalonePointCandidate(point, label);
+      return;
+    }
+    const basePoints = selectedCandidateObj?.promptPoints ?? promptPoints;
+    const nextPoints = [...basePoints, { ...point, label }];
+    await runPointSet(nextPoints);
+  }
+
+  async function runPointSet(nextPoints: PromptPoint[]) {
+    if (!currentImage) return;
+    const refineCandidateId = selectedCandidateObj?.localId ?? null;
+    setPromptPoints(nextPoints);
+    setStatus(refineCandidateId ? "Refining selected candidate with point set..." : "Running SAM with point set...");
+    const res = await api.samPrompt({
+      image_id: currentImage.id,
+      prompt_type: "point",
+      points: nextPoints,
+      category_name: selectedCandidateObj?.name ?? selectedAnnotationObj?.category_name ?? activeClassName,
+      accept: false
+    });
+    const filtered = filterPromptCandidates(res.candidates);
+    if (refineCandidateId && filtered.length > 0) {
+      const replacement = filtered[0];
+      setCandidates((items) =>
+        items.map((candidate) =>
+          candidate.localId === refineCandidateId
+            ? {
+                ...candidate,
+                ...replacement,
+                localId: candidate.localId,
+                imageId: candidate.imageId,
+                name: candidate.name,
+                visible: true,
+                reviewCandidateId: candidate.reviewCandidateId,
+                promptPoints: nextPoints,
+                prompt_type: "point:refined"
+              }
+            : candidate
+        )
+      );
+      setSelectedCandidate(refineCandidateId);
+      setSelectedAnnotation(null);
+      setStatus(res.sam_error ? `SAM failed: ${res.sam_error}` : `Refined selected candidate using ${nextPoints.length} point(s).`);
+      return;
+    }
+    if (refineCandidateId && filtered.length === 0) {
+      setCandidates((items) => items.map((candidate) => (candidate.localId === refineCandidateId ? { ...candidate, promptPoints: nextPoints } : candidate)));
+      setStatus(res.sam_error ? `SAM failed: ${res.sam_error}` : "SAM returned no refined mask for the selected candidate.");
+      return;
+    }
+    setNewCandidates(filtered, "point", nextPoints);
     setStatus(res.sam_error ? `SAM failed: ${res.sam_error}` : res.candidates.length ? `SAM returned ${filtered.length}/${res.candidates.length} candidate masks after filters.` : "SAM returned no masks.");
   }
 
@@ -944,6 +1129,7 @@ function App() {
     const previousCandidates = candidates;
     const previousSelectedCandidate = selectedCandidate;
     const previousSelectedAnnotation = selectedAnnotation;
+    const previousPromptPoints = promptPoints;
     const created = await api.createAnnotation(imageId, selectedCandidateObj.name || activeClassName, selectedCandidateObj.mask_png, "accepted");
     let activeAnnotationId = created.id;
     if (selectedCandidateObj.reviewCandidateId) {
@@ -955,6 +1141,7 @@ function App() {
     setAnnotations((items) => [...items.filter((item) => item.id !== created.id), { ...created, visible: true }]);
     setCandidates((items) => items.filter((item) => item.localId !== selectedCandidateObj.localId));
     setSelectedCandidate(null);
+    setPromptPoints([]);
     await refreshAfterAnnotationMutation(imageId);
     recordEditorAction({
       label: "accept selected candidate",
@@ -967,6 +1154,7 @@ function App() {
         setCandidates(previousCandidates);
         setSelectedCandidate(previousSelectedCandidate);
         setSelectedAnnotation(previousSelectedAnnotation);
+        setPromptPoints(previousPromptPoints);
         await refreshAfterAnnotationMutation(imageId, imageId);
       },
       redo: async () => {
@@ -978,6 +1166,7 @@ function App() {
         }
         setCandidates((items) => items.filter((item) => item.localId !== acceptedCandidate.localId));
         setSelectedCandidate(null);
+        setPromptPoints([]);
         setSelectedAnnotation(redone.id);
         setAnnotationMasks((previous) => ({ ...previous, [redone.id]: acceptedCandidate.mask_png }));
         await refreshAfterAnnotationMutation(imageId);
@@ -991,6 +1180,7 @@ function App() {
     const imageId = currentImage.id;
     const acceptedCandidates = candidates;
     const previousSelectedCandidate = selectedCandidate;
+    const previousPromptPoints = promptPoints;
     const createdAnnotations: AnnotationRecord[] = [];
     const createdMasks: Record<number, string> = {};
     let activeAnnotationIds: number[] = [];
@@ -1020,6 +1210,7 @@ function App() {
         }
         setCandidates(acceptedCandidates);
         setSelectedCandidate(previousSelectedCandidate);
+        setPromptPoints(previousPromptPoints);
         await refreshAfterAnnotationMutation(imageId, imageId);
       },
       redo: async () => {
@@ -1039,6 +1230,7 @@ function App() {
         setAnnotationMasks((previous) => ({ ...previous, ...nextMasks }));
         setCandidates([]);
         setSelectedCandidate(null);
+        setPromptPoints([]);
         await refreshAfterAnnotationMutation(imageId);
       }
     });
@@ -1420,11 +1612,7 @@ function App() {
       setStatus("Undid candidate/manual edit.");
       return;
     }
-    if (!selectedAnnotation || !currentImage) return;
-    await api.undoAnnotation(selectedAnnotation);
-    await refreshAnnotations(currentImage.id);
-    await loadSelectedAnnotationMask();
-    setStatus("Undid saved object mask edit.");
+    setStatus("Nothing to undo.");
   }
 
   async function redoUniversal() {
@@ -1450,11 +1638,7 @@ function App() {
       setStatus(`Redid ${action.label}.`);
       return;
     }
-    if (!selectedAnnotation || !currentImage) return;
-    await api.redoAnnotation(selectedAnnotation);
-    await refreshAnnotations(currentImage.id);
-    await loadSelectedAnnotationMask();
-    setStatus("Redid saved object mask edit.");
+    setStatus("Nothing to redo.");
   }
 
   async function runSearch() {
@@ -1954,6 +2138,45 @@ function App() {
     setStatus(issues.length ? `${issues.length} QA issues. First: ${issues[0].message}` : "QA passed.");
   }
 
+  async function removePromptPoint(index: number) {
+    const nextPoints = promptPoints.filter((_, itemIndex) => itemIndex !== index);
+    pushCandidateHistory();
+    if (nextPoints.length === 0) {
+      setPromptPoints([]);
+      if (selectedCandidate) {
+        setCandidates((items) => items.map((candidate) => (candidate.localId === selectedCandidate ? { ...candidate, promptPoints: [] } : candidate)));
+      }
+      setStatus("Removed final point.");
+      return;
+    }
+    await runPointSet(nextPoints);
+    setStatus(`Removed point. ${nextPoints.length} point(s) remain.`);
+  }
+
+  async function togglePromptPoint(index: number) {
+    const nextPoints = promptPoints.map((point, itemIndex) =>
+      itemIndex === index ? { ...point, label: (point.label ? 0 : 1) as 0 | 1 } : point
+    );
+    pushCandidateHistory();
+    await runPointSet(nextPoints);
+  }
+
+  function selectCandidateForEditing(candidate: Candidate) {
+    setSelectedCandidate(candidate.localId);
+    setSelectedAnnotation(null);
+    setPromptPoints(candidate.promptPoints ?? []);
+  }
+
+  function clearActivePromptPoints() {
+    if (promptPoints.length === 0) return;
+    pushCandidateHistory();
+    setPromptPoints([]);
+    if (selectedCandidate) {
+      setCandidates((items) => items.map((candidate) => (candidate.localId === selectedCandidate ? { ...candidate, promptPoints: [] } : candidate)));
+    }
+    setStatus("Cleared active point prompts.");
+  }
+
   function onPointerDown(evt: React.MouseEvent) {
     if (evt.button === 1) {
       evt.preventDefault();
@@ -1975,6 +2198,14 @@ function App() {
     }
     const existingPromptIndex = findNearestPoint(promptPoints, point);
     if (existingPromptIndex !== null && (tool === "point_pos" || tool === "point_neg")) {
+      if (evt.altKey) {
+        void removePromptPoint(existingPromptIndex);
+        return;
+      }
+      if (evt.shiftKey) {
+        void togglePromptPoint(existingPromptIndex);
+        return;
+      }
       pushCandidateHistory();
       setDragPromptIndex(existingPromptIndex);
       return;
@@ -1986,7 +2217,7 @@ function App() {
       return;
     }
     if (tool === "point_pos" || tool === "point_neg") {
-      void runPoint(point, tool === "point_pos" ? 1 : 0);
+      void runPoint(point, evt.shiftKey ? 0 : tool === "point_pos" ? 1 : 0);
       return;
     }
     if (tool === "polygon") {
@@ -1997,6 +2228,7 @@ function App() {
     }
     if ((tool === "brush" || tool === "erase") && (selectedCandidateObj || selectedAnnotation)) {
       if (selectedCandidateObj) pushCandidateHistory();
+      lastBrushPointRef.current = null;
       setPainting(true);
       setEditingTarget(selectedCandidateObj ? "candidate" : "annotation");
       paintMask(evt);
@@ -2056,7 +2288,9 @@ function App() {
       const target = resizeDrag.target;
       setResizeDrag(null);
       if (target === "annotation" && selectedAnnotation && editMaskDataRef.current && currentImage) {
-        await api.replaceMask(selectedAnnotation, editMaskDataRef.current);
+        const annotationId = selectedAnnotation;
+        await api.replaceMask(annotationId, editMaskDataRef.current);
+        recordSavedObjectMaskEdit(annotationId, currentImage.id, `adjust object #${annotationId} outline`);
         await refreshAnnotations(currentImage.id);
         setStatus("Saved adjusted object outline.");
       } else {
@@ -2078,6 +2312,7 @@ function App() {
     }
     if (painting) {
       setPainting(false);
+      lastBrushPointRef.current = null;
       await saveEditedMask();
       setEditingTarget(null);
       return;
@@ -2091,6 +2326,7 @@ function App() {
 
   function onPointerLeave() {
     setBrushCursor(null);
+    lastBrushPointRef.current = null;
     if (!panning) return;
     setPanning(false);
     panStartRef.current = null;
@@ -2209,7 +2445,6 @@ function App() {
       if (activeImageIdRef.current !== imageId) return;
       ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
       ctx.drawImage(img, 0, 0, maskCanvas.width, maskCanvas.height);
-      drawOverlay();
     };
     img.src = dataUrl;
   }
@@ -2220,14 +2455,24 @@ function App() {
     if (!point || !maskCanvas) return;
     const ctx = maskCanvas.getContext("2d");
     if (!ctx) return;
+    const previous = lastBrushPointRef.current ?? point;
     ctx.save();
     ctx.globalCompositeOperation = "source-over";
-    ctx.fillStyle = tool === "brush" ? "white" : "black";
+    ctx.strokeStyle = tool === "brush" ? "white" : "black";
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.lineWidth = brushSize * 2;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(previous.x, previous.y);
+    ctx.lineTo(point.x, point.y);
+    ctx.stroke();
     ctx.beginPath();
     ctx.arc(point.x, point.y, brushSize, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
-    setEditMaskData(maskCanvas.toDataURL("image/png"));
+    lastBrushPointRef.current = point;
+    scheduleBrushPreview();
   }
 
   async function saveEditedMask() {
@@ -2241,12 +2486,18 @@ function App() {
           candidate.localId === selectedCandidateObj.localId ? { ...candidate, mask_png: maskPng } : candidate
         )
       );
+      setEditMaskData(maskPng);
+      window.requestAnimationFrame(() => clearBrushPreview(currentImage.width, currentImage.height));
       setStatus("Candidate mask edited. Accept to save it as an object.");
       return;
     }
     if (selectedAnnotation) {
-      await api.replaceMask(selectedAnnotation, maskPng);
+      const annotationId = selectedAnnotation;
+      await api.replaceMask(annotationId, maskPng);
+      recordSavedObjectMaskEdit(annotationId, currentImage.id, `brush edit object #${annotationId}`);
+      setEditMaskData(maskPng);
       await refreshAnnotations(currentImage.id);
+      window.requestAnimationFrame(() => clearBrushPreview(currentImage.width, currentImage.height));
       setStatus("Saved object mask edit.");
     }
   }
@@ -2439,15 +2690,23 @@ function App() {
   }
 
   function drawPromptPoints(ctx: CanvasRenderingContext2D) {
+    let positiveIndex = 0;
+    let negativeIndex = 0;
     promptPoints.forEach((point) => {
+      const labelIndex = point.label ? ++positiveIndex : ++negativeIndex;
       ctx.save();
       ctx.fillStyle = point.label ? "#23c37a" : "#e23b3b";
       ctx.strokeStyle = "white";
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(point.x, point.y, 7, 0, Math.PI * 2);
+      ctx.arc(point.x, point.y, 8, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
+      ctx.fillStyle = "white";
+      ctx.font = "bold 9px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(`${point.label ? "+" : "-"}${labelIndex}`, point.x, point.y);
       ctx.restore();
     });
   }
@@ -2686,7 +2945,8 @@ function App() {
                 draggable={false}
                 onDragStart={(event) => event.preventDefault()}
               />
-              <canvas ref={canvasRef} />
+              <canvas ref={canvasRef} className="overlay-canvas" />
+              <canvas ref={brushPreviewCanvasRef} className="brush-preview-canvas" />
               {(tool === "brush" || tool === "erase") && brushCursor && (
                 <div
                   className={tool === "erase" ? "brush-cursor erase" : "brush-cursor"}
@@ -2743,6 +3003,13 @@ function App() {
             <section className="panel">
               <div className="section-title">Unsaved Candidates</div>
               <div className="prompt-filters">
+                <label>
+                  Point Mode
+                  <select value={pointPromptMode} onChange={(event) => setPointPromptMode(event.target.value as "refine" | "new_candidate")}>
+                    <option value="refine">Refine selected</option>
+                    <option value="new_candidate">New candidate per click</option>
+                  </select>
+                </label>
                 <div className="compact-row">
                   <select value={promptFilterMode} onChange={(event) => setPromptFilterMode(event.target.value as CandidateFilterMode)}>
                     <option value="top_k">Top K only</option>
@@ -2760,6 +3027,10 @@ function App() {
                   </label>
                 )}
               </div>
+              <div className="point-controls">
+                <button onClick={clearActivePromptPoints} disabled={promptPoints.length === 0}>Clear Points</button>
+                <span className="hint">{promptPoints.length} active point{promptPoints.length === 1 ? "" : "s"}. Shift-click negative, Alt-click removes.</span>
+              </div>
               {candidates.length === 0 && <p className="hint">Run a prompt. Accept saves a candidate as an object.</p>}
               {candidates.map((candidate, index) => (
                 <div
@@ -2768,10 +3039,7 @@ function App() {
                 >
                   <button
                     className="candidate-main"
-                    onClick={() => {
-                      setSelectedCandidate(candidate.localId);
-                      setSelectedAnnotation(null);
-                    }}
+                    onClick={() => selectCandidateForEditing(candidate)}
                   >
                     <span style={{ borderColor: COLORS[index % COLORS.length] }}>id={index + 1}</span>
                     <input
@@ -2782,6 +3050,7 @@ function App() {
                       title="Rename candidate"
                     />
                     {candidate.localId === selectedCandidate && <small className="selected-pill">Selected</small>}
+                    {candidate.promptPoints?.length ? <small>{candidate.promptPoints.length} pt</small> : null}
                     <small>{candidate.score == null ? "manual" : candidate.score.toFixed(2)}</small>
                   </button>
                   <button title="Toggle candidate visibility" onClick={() => toggleCandidateVisibility(candidate.localId)}>

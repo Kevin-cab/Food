@@ -737,6 +737,16 @@ small {
   margin-bottom: 8px;
 }
 
+.point-controls {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 8px;
+}
+
+.point-controls .hint {
+  margin: 0;
+}
+
 .prompt-filters label,
 .compact-row label {
   display: grid;

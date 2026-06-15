@@ -188,7 +188,13 @@ class AnnotationService:
             copy_mask(old_abs, revision_abs)
         mask = mask_from_png_data(mask_png)
         bbox, area = bbox_and_area(mask)
+        obsolete_redo_paths: list[str] = []
         with project.connect() as conn:
+            rows = conn.execute(
+                "SELECT mask_path FROM annotation_redo WHERE annotation_id=?",
+                (annotation_id,),
+            ).fetchall()
+            obsolete_redo_paths.extend(row["mask_path"] for row in rows)
             conn.execute("DELETE FROM annotation_redo WHERE annotation_id=?", (annotation_id,))
             if has_previous_mask:
                 conn.execute(
@@ -207,6 +213,10 @@ class AnnotationService:
                 (bbox_json(bbox), area, annotation_id),
             )
         save_mask(mask, old_abs)
+        for rel_path in set(obsolete_redo_paths):
+            redo_path = project.meta_dir / rel_path
+            if redo_path.exists():
+                redo_path.unlink()
         return self.get(project, annotation_id)
 
     def undo(self, project: ProjectDb, annotation_id: int) -> AnnotationRecord:
