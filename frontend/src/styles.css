@@ -399,6 +399,18 @@ small {
   font-weight: 650;
 }
 
+.image-cleanup {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #d8ddd1;
+  border-radius: 6px;
+  background: #fbfcf7;
+}
+
+.image-cleanup .hint {
+  margin: 0;
+}
 .input-action-row,
 .count-filter-row {
   display: grid;
@@ -431,6 +443,23 @@ small {
   text-align: left;
 }
 
+.image-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.image-item input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.image-item.selected-for-cleanup {
+  border-color: #10a584;
+  background: #e7f7f1;
+}
 .image-item span,
 .object-main span,
 .job-main,
@@ -573,6 +602,28 @@ small {
 .object.active .object-main {
   border-color: #17a989;
   background: #f2fbf7;
+}
+
+.candidate.selected-for-batch,
+.object.selected-for-batch {
+  padding: 4px;
+  border: 2px solid #d4a217;
+  border-radius: 7px;
+  background: #fff7db;
+  box-shadow: 0 0 0 1px rgba(212, 162, 23, 0.14);
+}
+
+.candidate.selected-for-batch .candidate-main,
+.object.selected-for-batch .object-main {
+  border-color: #d4a217;
+  background: #fffaf0;
+}
+
+.candidate.active.selected-for-batch,
+.object.active.selected-for-batch {
+  border-color: #17a989;
+  background: #dff5ed;
+  box-shadow: 0 0 0 1px rgba(23, 169, 137, 0.18);
 }
 
 .candidate.active strong,
@@ -729,6 +780,20 @@ small {
 .panel-action {
   width: 100%;
   margin: 0 0 8px;
+}
+
+.batch-actions {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 8px;
+  border: 1px solid #d8ddd1;
+  border-radius: 6px;
+  background: #fbfcf7;
+}
+
+.batch-actions .hint {
+  margin: 0;
 }
 
 .prompt-filters {

@@ -161,6 +161,21 @@ class AnnotationBulkClassRenameResponse(BaseModel):
     status: str
 
 
+class AnnotationBulkDeleteImagesRequest(BaseModel):
+    image_ids: list[int] = Field(min_length=1)
+    status: Literal["accepted", "pending", "rejected", "all"] = "accepted"
+
+
+class AnnotationBulkDeleteResponse(BaseModel):
+    deleted: int
+    annotation_ids: list[int]
+    image_ids: list[int]
+
+
+class AnnotationMissingMaskCleanupResponse(BaseModel):
+    deleted: int
+    annotation_ids: list[int]
+
 class MaskReplaceRequest(BaseModel):
     mask_png: str
 

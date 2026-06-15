@@ -100,6 +100,8 @@ function App() {
   const [project, setProject] = useState<string>("");
   const [projectKey, setProjectKey] = useState<string>("");
   const [images, setImages] = useState<ImageRecord[]>([]);
+  const [selectedImageIds, setSelectedImageIds] = useState<Set<number>>(new Set());
+  const [lastSelectedImageId, setLastSelectedImageId] = useState<number | null>(null);
   const [imageTotal, setImageTotal] = useState(0);
   const [annotationClassName, setAnnotationClassName] = useState("food");
   const [bulkClassRenameFrom, setBulkClassRenameFrom] = useState("");
@@ -115,10 +117,14 @@ function App() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [annotations, setAnnotations] = useState<AnnotationRecord[]>([]);
   const [selectedAnnotation, setSelectedAnnotation] = useState<number | null>(null);
+  const [selectedObjectIds, setSelectedObjectIds] = useState<Set<number>>(new Set());
+  const [lastSelectedObjectId, setLastSelectedObjectId] = useState<number | null>(null);
   const [tool, setTool] = useState<ToolMode>("view");
   const [promptText, setPromptText] = useState("food");
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState<number | null>(null);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<number>>(new Set());
+  const [lastSelectedCandidateId, setLastSelectedCandidateId] = useState<number | null>(null);
   const [promptPoints, setPromptPoints] = useState<PromptPoint[]>([]);
   const [polygonPoints, setPolygonPoints] = useState<Point[]>([]);
   const [candidateHistory, setCandidateHistory] = useState<WorkState[]>([]);
@@ -242,6 +248,10 @@ function App() {
   function clearSelection() {
     setSelectedCandidate(null);
     setSelectedAnnotation(null);
+    setSelectedCandidateIds(new Set());
+    setLastSelectedCandidateId(null);
+    setSelectedObjectIds(new Set());
+    setLastSelectedObjectId(null);
     setEditMaskData(null);
     setResizeDrag(null);
     setEditingTarget(null);
@@ -334,6 +344,8 @@ function App() {
     setAnnotations([]);
     setAnnotationMasks({});
     setSelectedAnnotation(null);
+    setSelectedObjectIds(new Set());
+    setLastSelectedObjectId(null);
     setEditMaskData(null);
     clearMaskCanvas(currentImage.width, currentImage.height);
     clearBrushPreview(currentImage.width, currentImage.height);
@@ -536,6 +548,8 @@ function App() {
     setProject("");
     setProjectKey("");
     setImages([]);
+    setSelectedImageIds(new Set());
+    setLastSelectedImageId(null);
     setImageTotal(0);
     setImageFiltersOpen(false);
     setImageFilenameFilter("");
@@ -549,8 +563,12 @@ function App() {
     setAnnotations([]);
     setAnnotationMasks({});
     setSelectedAnnotation(null);
+    setSelectedObjectIds(new Set());
+    setLastSelectedObjectId(null);
     setCandidates([]);
     setSelectedCandidate(null);
+    setSelectedCandidateIds(new Set());
+    setLastSelectedCandidateId(null);
     setReviewCandidates([]);
     setPendingReviewOpen(null);
     setBulkJobs([]);
@@ -721,6 +739,97 @@ function App() {
     }
   }
 
+  function toggleImageSelected(imageId: number) {
+    setSelectedImageIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(imageId)) next.delete(imageId);
+      else next.add(imageId);
+      return next;
+    });
+    setLastSelectedImageId(imageId);
+  }
+
+  function selectImageRange(toIndex: number) {
+    const anchorIndex = lastSelectedImageId == null ? currentIndex : images.findIndex((image) => image.id === lastSelectedImageId);
+    const start = Math.max(0, anchorIndex >= 0 ? anchorIndex : toIndex);
+    const end = Math.max(0, toIndex);
+    const [from, to] = start <= end ? [start, end] : [end, start];
+    const rangeIds = images.slice(from, to + 1).map((image) => image.id);
+    setSelectedImageIds((previous) => {
+      const next = new Set(previous);
+      for (const id of rangeIds) next.add(id);
+      return next;
+    });
+    setLastSelectedImageId(images[toIndex]?.id ?? null);
+  }
+
+  function handleImageRowClick(event: React.MouseEvent<HTMLButtonElement>, image: ImageRecord, index: number) {
+    if (event.shiftKey) {
+      event.preventDefault();
+      selectImageRange(index);
+      return;
+    }
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      toggleImageSelected(image.id);
+      return;
+    }
+    setCurrentIndex(index);
+  }
+
+  function selectAllLoadedImages() {
+    setSelectedImageIds(new Set(images.map((image) => image.id)));
+    setLastSelectedImageId(images.length > 0 ? images[images.length - 1].id : null);
+  }
+
+  function clearSelectedImages() {
+    setSelectedImageIds(new Set());
+    setLastSelectedImageId(null);
+  }
+
+  async function deleteObjectsForSelectedImages() {
+    if (!project || selectedImageIds.size === 0) return;
+    const selectedIds = Array.from(selectedImageIds);
+    const selectedLoadedImages = images.filter((image) => selectedImageIds.has(image.id));
+    const objectCount = selectedLoadedImages.reduce((sum, image) => sum + image.accepted_object_count, 0);
+    const detail = objectCount > 0 ? `${objectCount} accepted object(s)` : "accepted objects";
+    if (!window.confirm(`Delete ${detail} from ${selectedIds.length} selected image(s)? This also removes their mask PNGs and undo/redo mask files.`)) return;
+    try {
+      const result = await api.bulkDeleteAnnotationsForImages(selectedIds, "accepted");
+      setSelectedImageIds(new Set());
+      setLastSelectedImageId(null);
+      setAnnotationMasks((previous) => {
+        const next = { ...previous };
+        for (const id of result.annotation_ids) delete next[id];
+        return next;
+      });
+      if (currentImage && result.image_ids.includes(currentImage.id)) {
+        await refreshAnnotations(currentImage.id);
+      }
+      await refreshFilteredImageList(currentImage?.id ?? null);
+      setStatus(`Deleted ${result.deleted} saved object(s) from ${result.image_ids.length} image(s).`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Bulk delete failed.");
+    }
+  }
+
+  async function cleanupMissingMaskObjects() {
+    if (!project) return;
+    if (!window.confirm("Remove saved object records whose mask PNG files are missing? This repairs ghost objects left by manual filesystem deletion.")) return;
+    try {
+      const result = await api.cleanupMissingMaskAnnotations();
+      setAnnotationMasks((previous) => {
+        const next = { ...previous };
+        for (const id of result.annotation_ids) delete next[id];
+        return next;
+      });
+      if (currentImage) await refreshAnnotations(currentImage.id);
+      await refreshFilteredImageList(currentImage?.id ?? null);
+      setStatus(`Removed ${result.deleted} missing-mask object record(s).`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Missing-mask cleanup failed.");
+    }
+  }
   async function refreshAnnotations(imageId: number) {
     const loaded = await api.listAnnotations(imageId);
     if (activeImageIdRef.current !== imageId) return;
@@ -778,6 +887,8 @@ function App() {
     clearOverlayCanvas(currentImage?.width, currentImage?.height);
     setCandidates(state.candidates);
     setSelectedCandidate(state.selectedCandidate);
+    setSelectedCandidateIds(new Set());
+    setLastSelectedCandidateId(null);
     setPromptPoints(state.promptPoints);
     setPolygonPoints(state.polygonPoints);
     clearBrushPreview(currentImage?.width, currentImage?.height);
@@ -870,7 +981,11 @@ function App() {
     }));
     setCandidates(next);
     setSelectedCandidate(next[0]?.localId ?? null);
+    setSelectedCandidateIds(new Set());
+    setLastSelectedCandidateId(next[0]?.localId ?? null);
     setSelectedAnnotation(null);
+    setSelectedObjectIds(new Set());
+    setLastSelectedObjectId(null);
   }
 
   function appendNewCandidates(raw: MaskCandidate[], source: string, sourcePoints: PromptPoint[] = []) {
@@ -885,7 +1000,11 @@ function App() {
     }));
     setCandidates((items) => [...items, ...next]);
     setSelectedCandidate(next[0]?.localId ?? null);
+    setSelectedCandidateIds(new Set());
+    setLastSelectedCandidateId(next[0]?.localId ?? null);
     setSelectedAnnotation(null);
+    setSelectedObjectIds(new Set());
+    setLastSelectedObjectId(null);
     return next;
   }
 
@@ -903,6 +1022,8 @@ function App() {
     const hadCandidates = candidates.length > 0;
     setCandidates([]);
     setSelectedCandidate(null);
+    setSelectedCandidateIds(new Set());
+    setLastSelectedCandidateId(null);
     setPromptPoints([]);
     setPolygonPoints([]);
     setCandidateHistory([]);
@@ -1143,6 +1264,8 @@ function App() {
     setAnnotations((items) => [...items.filter((item) => item.id !== created.id), { ...created, visible: true }]);
     setCandidates((items) => items.filter((item) => item.localId !== selectedCandidateObj.localId));
     setSelectedCandidate(null);
+    setSelectedCandidateIds(new Set());
+    setLastSelectedCandidateId(null);
     setPromptPoints([]);
     await refreshAfterAnnotationMutation(imageId);
     recordEditorAction({
@@ -1168,6 +1291,8 @@ function App() {
         }
         setCandidates((items) => items.filter((item) => item.localId !== acceptedCandidate.localId));
         setSelectedCandidate(null);
+        setSelectedCandidateIds(new Set());
+        setLastSelectedCandidateId(null);
         setPromptPoints([]);
         setSelectedAnnotation(redone.id);
         setAnnotationMasks((previous) => ({ ...previous, [redone.id]: acceptedCandidate.mask_png }));
@@ -1232,6 +1357,8 @@ function App() {
         setAnnotationMasks((previous) => ({ ...previous, ...nextMasks }));
         setCandidates([]);
         setSelectedCandidate(null);
+        setSelectedCandidateIds(new Set());
+        setLastSelectedCandidateId(null);
         setPromptPoints([]);
         await refreshAfterAnnotationMutation(imageId);
       }
@@ -1291,6 +1418,12 @@ function App() {
       }
     }
     await deleteAnnotationLocal(id);
+    setSelectedObjectIds((previous) => {
+      const next = new Set(previous);
+      next.delete(id);
+      return next;
+    });
+    if (lastSelectedObjectId === id) setLastSelectedObjectId(null);
     if (removed?.image_id) await refreshAfterAnnotationMutation(removed.image_id, removed.image_id);
     if (removed && removedMask) {
       let activeAnnotationId: number | null = null;
@@ -1303,6 +1436,8 @@ function App() {
           if (restored.visible) setAnnotationMasks((previous) => ({ ...previous, [restored.id]: removedMask }));
           setSelectedAnnotation(restored.id);
           setSelectedCandidate(null);
+          setSelectedObjectIds(new Set([restored.id]));
+          setLastSelectedObjectId(restored.id);
           await refreshAfterAnnotationMutation(removed.image_id, removed.image_id);
         },
         redo: async () => {
@@ -1310,6 +1445,8 @@ function App() {
             await deleteAnnotationLocal(activeAnnotationId);
             activeAnnotationId = null;
           }
+          setSelectedObjectIds(new Set());
+          setLastSelectedObjectId(null);
           await refreshAfterAnnotationMutation(removed.image_id);
         }
       });
@@ -1349,6 +1486,88 @@ function App() {
     setCandidates((items) => items.map((item) => (item.localId === localId ? { ...item, visible: !item.visible } : item)));
   }
 
+  function toggleBatchCandidate(localId: number) {
+    setSelectedCandidateIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(localId)) next.delete(localId);
+      else next.add(localId);
+      return next;
+    });
+    setLastSelectedCandidateId(localId);
+  }
+
+  function selectCandidateBatchRange(toIndex: number) {
+    const anchorIndex = lastSelectedCandidateId == null ? candidates.findIndex((candidate) => candidate.localId === selectedCandidate) : candidates.findIndex((candidate) => candidate.localId === lastSelectedCandidateId);
+    const start = anchorIndex >= 0 ? anchorIndex : toIndex;
+    const [from, to] = start <= toIndex ? [start, toIndex] : [toIndex, start];
+    const ids = candidates.slice(from, to + 1).map((candidate) => candidate.localId);
+    setSelectedCandidateIds((previous) => {
+      const next = new Set(previous);
+      for (const id of ids) next.add(id);
+      return next;
+    });
+    setLastSelectedCandidateId(candidates[toIndex]?.localId ?? null);
+  }
+
+  function handleCandidateRowClick(event: React.MouseEvent<HTMLButtonElement>, candidate: Candidate, index: number) {
+    setSelectedAnnotation(null);
+    clearObjectBatchSelection();
+    if (event.shiftKey) {
+      event.preventDefault();
+      selectCandidateBatchRange(index);
+      return;
+    }
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      toggleBatchCandidate(candidate.localId);
+      return;
+    }
+    setSelectedCandidateIds(new Set([candidate.localId]));
+    setLastSelectedCandidateId(candidate.localId);
+    selectCandidateForEditing(candidate);
+  }
+
+  function toggleBatchObject(id: number) {
+    setSelectedObjectIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setLastSelectedObjectId(id);
+  }
+
+  function selectObjectBatchRange(toIndex: number) {
+    const anchorIndex = lastSelectedObjectId == null ? annotations.findIndex((annotation) => annotation.id === selectedAnnotation) : annotations.findIndex((annotation) => annotation.id === lastSelectedObjectId);
+    const start = anchorIndex >= 0 ? anchorIndex : toIndex;
+    const [from, to] = start <= toIndex ? [start, toIndex] : [toIndex, start];
+    const ids = annotations.slice(from, to + 1).map((annotation) => annotation.id);
+    setSelectedObjectIds((previous) => {
+      const next = new Set(previous);
+      for (const id of ids) next.add(id);
+      return next;
+    });
+    setLastSelectedObjectId(annotations[toIndex]?.id ?? null);
+  }
+
+  function handleObjectRowClick(event: React.MouseEvent<HTMLButtonElement>, annotation: AnnotationRecord, index: number) {
+    setSelectedCandidate(null);
+    clearCandidateBatchSelection();
+    if (event.shiftKey) {
+      event.preventDefault();
+      selectObjectBatchRange(index);
+      return;
+    }
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      toggleBatchObject(annotation.id);
+      return;
+    }
+    setSelectedObjectIds(new Set([annotation.id]));
+    setLastSelectedObjectId(annotation.id);
+    setSelectedAnnotation(annotation.id);
+    setSelectedCandidate(null);
+  }
   async function showAllObjects() {
     if (!currentImage || annotations.length === 0) return;
     setStatus("Showing all saved object masks...");
@@ -1393,12 +1612,174 @@ function App() {
     return canvas.toDataURL("image/png");
   }
 
-  async function combineSavedObjectMasks() {
+  async function unionCandidateMasks(items: Candidate[]) {
+    if (!currentImage) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = currentImage.width;
+    canvas.height = currentImage.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    const output = ctx.createImageData(currentImage.width, currentImage.height);
+    let area = 0;
+    let minX = currentImage.width;
+    let minY = currentImage.height;
+    let maxX = -1;
+    let maxY = -1;
+    for (const item of items) {
+      const img = await loadImage(item.mask_png);
+      const pixels = maskPixels(img, currentImage.width, currentImage.height);
+      if (!pixels) continue;
+      for (let y = 0; y < pixels.height; y += 1) {
+        for (let x = 0; x < pixels.width; x += 1) {
+          const i = (y * pixels.width + x) * 4;
+          if (!isMaskPixel(pixels.data, i)) continue;
+          if (output.data[i + 3] === 0) area += 1;
+          output.data[i] = 255;
+          output.data[i + 1] = 255;
+          output.data[i + 2] = 255;
+          output.data[i + 3] = 255;
+          minX = Math.min(minX, x);
+          minY = Math.min(minY, y);
+          maxX = Math.max(maxX, x);
+          maxY = Math.max(maxY, y);
+        }
+      }
+    }
+    if (area === 0 || maxX < minX || maxY < minY) return null;
+    ctx.putImageData(output, 0, 0);
+    return {
+      maskPng: canvas.toDataURL("image/png"),
+      bbox: [minX, minY, maxX - minX + 1, maxY - minY + 1] as [number, number, number, number],
+      area
+    };
+  }
+
+  function clearCandidateBatchSelection() {
+    setSelectedCandidateIds(new Set());
+    setLastSelectedCandidateId(null);
+  }
+
+  function clearObjectBatchSelection() {
+    setSelectedObjectIds(new Set());
+    setLastSelectedObjectId(null);
+  }
+
+  async function deleteSelectedCandidates() {
+    const selectedItems = candidates.filter((candidate) => selectedCandidateIds.has(candidate.localId));
+    if (selectedItems.length === 0) {
+      setStatus("Select candidate masks first.");
+      return;
+    }
+    if (!window.confirm(`Delete ${selectedItems.length} selected unsaved candidate(s)?`)) return;
+    pushCandidateHistory();
+    const selectedIds = new Set(selectedItems.map((candidate) => candidate.localId));
+    setCandidates((items) => items.filter((candidate) => !selectedIds.has(candidate.localId)));
+    if (selectedCandidate != null && selectedIds.has(selectedCandidate)) {
+      setSelectedCandidate(null);
+      setPromptPoints([]);
+      setEditMaskData(null);
+      clearMaskCanvas(currentImage?.width ?? 1, currentImage?.height ?? 1);
+    }
+    clearCandidateBatchSelection();
+    setStatus(`Deleted ${selectedItems.length} selected candidate${selectedItems.length === 1 ? "" : "s"}.`);
+  }
+
+  async function combineSelectedCandidates() {
+    const selectedItems = candidates.filter((candidate) => selectedCandidateIds.has(candidate.localId));
+    if (selectedItems.length < 2) {
+      setStatus("Select at least two candidate masks to combine.");
+      return;
+    }
+    const combined = await unionCandidateMasks(selectedItems);
+    if (!combined) {
+      setStatus("Could not combine selected candidate masks.");
+      return;
+    }
+    pushCandidateHistory();
+    const combinedCandidate: Candidate = {
+      localId: Date.now(),
+      imageId: currentImage?.id ?? 0,
+      name: activeClassName,
+      visible: true,
+      score: null,
+      prompt_type: "manual",
+      mask_png: combined.maskPng,
+      bbox: combined.bbox,
+      area: combined.area,
+      annotation: null
+    };
+    const selectedIds = new Set(selectedItems.map((candidate) => candidate.localId));
+    const nextCandidates = [...candidates.filter((candidate) => !selectedIds.has(candidate.localId)), combinedCandidate];
+    setCandidates(nextCandidates);
+    setSelectedCandidate(combinedCandidate.localId);
+    setPromptPoints([]);
+    setEditMaskData(combinedCandidate.mask_png);
+    hydrateMaskCanvas(combinedCandidate.mask_png);
+    clearCandidateBatchSelection();
+    setStatus(`Combined ${selectedItems.length} selected candidates into one candidate.`);
+  }
+
+  async function deleteSelectedObjects() {
+    if (!currentImage) return;
+    const selectedItems = annotations.filter((annotation) => selectedObjectIds.has(annotation.id));
+    if (selectedItems.length === 0) {
+      setStatus("Select saved objects first.");
+      return;
+    }
+    if (!window.confirm(`Delete ${selectedItems.length} selected saved object(s)?`)) return;
+    const imageId = currentImage.id;
+    const previousSelectedAnnotation = selectedAnnotation;
+    const previousSelectedObjectIds = new Set(selectedObjectIds);
+    const previousLastSelectedObjectId = lastSelectedObjectId;
+    const snapshots = await Promise.all(
+      selectedItems.map(async (annotation) => ({
+        annotation,
+        maskPng: await loadAnnotationMaskData(annotation)
+      }))
+    );
+    const selectedIds = new Set(selectedItems.map((annotation) => annotation.id));
+    await Promise.all(selectedItems.map((annotation) => deleteAnnotationLocal(annotation.id)));
+    if (previousSelectedAnnotation != null && selectedIds.has(previousSelectedAnnotation)) {
+      setSelectedAnnotation(null);
+      setEditMaskData(null);
+    }
+    clearObjectBatchSelection();
+    await refreshAfterAnnotationMutation(imageId, imageId);
+    let restoredIds: number[] = [];
+    recordEditorAction({
+      label: `delete ${selectedItems.length} objects`,
+      undo: async () => {
+        const restored = await Promise.all(
+          snapshots.map((snapshot) => restoreAnnotationFromSnapshot(snapshot.annotation, snapshot.maskPng))
+        );
+        restoredIds = restored.map((annotation) => annotation.id);
+        setSelectedAnnotation(restored[0]?.id ?? null);
+        setSelectedObjectIds(new Set(restoredIds));
+        setLastSelectedObjectId(restoredIds[restoredIds.length - 1] ?? null);
+        await refreshAfterAnnotationMutation(imageId, imageId);
+      },
+      redo: async () => {
+        await Promise.all(restoredIds.map((id) => deleteAnnotationLocal(id).catch(() => undefined)));
+        restoredIds = [];
+        setSelectedAnnotation(null);
+        clearObjectBatchSelection();
+        await refreshAfterAnnotationMutation(imageId, imageId);
+      }
+    });
+    setStatus(`Deleted ${selectedItems.length} selected saved object${selectedItems.length === 1 ? "" : "s"}.`);
+  }
+
+  async function combineSavedObjectMasks(selectedOnly = false) {
     if (!currentImage) return;
     const imageId = currentImage.id;
-    const combinable = annotations.filter((annotation) => annotation.image_id === imageId && annotation.status === "accepted");
+    const combinable = annotations.filter(
+      (annotation) =>
+        annotation.image_id === imageId &&
+        annotation.status === "accepted" &&
+        (!selectedOnly || selectedObjectIds.has(annotation.id))
+    );
     if (combinable.length < 2) {
-      setStatus("Need at least two saved objects to combine.");
+      setStatus(selectedOnly ? "Select at least two accepted saved objects to combine." : "Need at least two saved objects to combine.");
       return;
     }
     const label = activeClassName || combinable[0].category_name || "food";
@@ -1422,6 +1803,7 @@ function App() {
       await Promise.all(combinable.map((annotation) => deleteAnnotationLocal(annotation.id)));
       setSelectedAnnotation(created.id);
       setSelectedCandidate(null);
+      clearObjectBatchSelection();
       setAnnotationMasks((previous) => {
         const next = { ...previous, [created.id]: combinedMask };
         combinable.forEach((annotation) => delete next[annotation.id]);
@@ -1449,6 +1831,8 @@ function App() {
             return next;
           });
           setSelectedAnnotation(restored[0]?.id ?? null);
+          setSelectedObjectIds(new Set(restored.map((annotation) => annotation.id)));
+          setLastSelectedObjectId(restored[restored.length - 1]?.id ?? null);
           await refreshAfterAnnotationMutation(imageId, imageId);
         },
         redo: async () => {
@@ -1457,6 +1841,7 @@ function App() {
           await Promise.all(activeRestoredIds.map((id) => deleteAnnotationLocal(id).catch(() => undefined)));
           activeRestoredIds = [];
           setSelectedAnnotation(redone.id);
+          clearObjectBatchSelection();
           setAnnotationMasks((previous) => ({ ...previous, [redone.id]: combinedMask }));
           await refreshAfterAnnotationMutation(imageId, imageId);
         }
@@ -2165,7 +2550,11 @@ function App() {
 
   function selectCandidateForEditing(candidate: Candidate) {
     setSelectedCandidate(candidate.localId);
+    setSelectedCandidateIds(new Set([candidate.localId]));
+    setLastSelectedCandidateId(candidate.localId);
     setSelectedAnnotation(null);
+    setSelectedObjectIds(new Set());
+    setLastSelectedObjectId(null);
     setPromptPoints(candidate.promptPoints ?? []);
   }
 
@@ -2767,6 +3156,10 @@ function App() {
     () => annotations.filter((annotation) => annotation.image_id === currentImage?.id && annotation.status === "accepted").length,
     [annotations, currentImage?.id]
   );
+  const selectedAcceptedObjectCount = useMemo(
+    () => annotations.filter((annotation) => selectedObjectIds.has(annotation.id) && annotation.status === "accepted").length,
+    [annotations, selectedObjectIds]
+  );
   const selectedJob = bulkJobs.find((job) => job.id === selectedJobId) ?? null;
   const reviewGroups = useMemo(() => {
     const groups = new Map<number, { image: ImageRecord; candidates: ReviewCandidateRecord[] }>();
@@ -2869,13 +3262,31 @@ function App() {
               ? `Indexing... ${indexStatus.indexed_count} indexed`
               : `${images.length}/${imageTotal} loaded`}
           </p>
+          <div className="image-cleanup">
+            <div className="compact-row">
+              <button onClick={selectAllLoadedImages} disabled={images.length === 0}>Select Loaded</button>
+              <button onClick={clearSelectedImages} disabled={selectedImageIds.size === 0}>Clear</button>
+            </div>
+            <button onClick={deleteObjectsForSelectedImages} disabled={selectedImageIds.size === 0}>
+              Delete Objects In Selected ({selectedImageIds.size})
+            </button>
+            <button onClick={cleanupMissingMaskObjects} disabled={!project}>Remove Missing-Mask Objects</button>
+            <p className="hint">Ctrl-click toggles rows, Shift-click selects a visible range. Normal row click opens the image.</p>
+          </div>
           <div className="image-scroll" onScroll={onImageListScroll}>
             {images.map((image, index) => (
               <button
                 key={image.id}
-                className={index === currentIndex ? "image-item active" : "image-item"}
-                onClick={() => setCurrentIndex(index)}
+                className={`${index === currentIndex ? "image-item active" : "image-item"} ${selectedImageIds.has(image.id) ? "selected-for-cleanup" : ""}`}
+                onClick={(event) => handleImageRowClick(event, image, index)}
               >
+                <input
+                  type="checkbox"
+                  checked={selectedImageIds.has(image.id)}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={() => toggleImageSelected(image.id)}
+                  title="Select image for bulk object cleanup"
+                />
                 <span>{image.file_name}</span>
                 <small>
                   {image.width}x{image.height} | {image.accepted_object_count} obj
@@ -3053,15 +3464,35 @@ function App() {
                 <button onClick={clearActivePromptPoints} disabled={promptPoints.length === 0}>Clear Points</button>
                 <span className="hint">{promptPoints.length} active point{promptPoints.length === 1 ? "" : "s"}. Shift-click negative, Alt-click removes.</span>
               </div>
+              {candidates.length > 0 && (
+                <div className="batch-actions">
+                  <div className="compact-row">
+                    <button
+                      onClick={() => {
+                        setSelectedCandidateIds(new Set(candidates.map((candidate) => candidate.localId)));
+                        setLastSelectedCandidateId(candidates.length > 0 ? candidates[candidates.length - 1].localId : null);
+                      }}
+                    >
+                      Select All
+                    </button>
+                    <button onClick={clearCandidateBatchSelection} disabled={selectedCandidateIds.size === 0}>Clear Selection</button>
+                  </div>
+                  <div className="compact-row">
+                    <button onClick={combineSelectedCandidates} disabled={selectedCandidateIds.size < 2}>Combine Selected</button>
+                    <button onClick={deleteSelectedCandidates} disabled={selectedCandidateIds.size === 0}>Delete Selected</button>
+                  </div>
+                  <p className="hint">Ctrl-click toggles rows. Shift-click selects a range.</p>
+                </div>
+              )}
               {candidates.length === 0 && <p className="hint">Run a prompt. Accept saves a candidate as an object.</p>}
               {candidates.map((candidate, index) => (
                 <div
                   key={candidate.localId}
-                  className={candidate.localId === selectedCandidate ? "candidate active" : "candidate"}
+                  className={`${candidate.localId === selectedCandidate ? "candidate active" : "candidate"}${selectedCandidateIds.has(candidate.localId) ? " selected-for-batch" : ""}`}
                 >
                   <button
                     className="candidate-main"
-                    onClick={() => selectCandidateForEditing(candidate)}
+                    onClick={(event) => handleCandidateRowClick(event, candidate, index)}
                   >
                     <span style={{ borderColor: COLORS[index % COLORS.length] }}>id={index + 1}</span>
                     <input
@@ -3091,9 +3522,29 @@ function App() {
                 </button>
               )}
               {annotations.length > 0 && (
+                <div className="batch-actions">
+                  <div className="compact-row">
+                    <button
+                      onClick={() => {
+                        setSelectedObjectIds(new Set(annotations.map((annotation) => annotation.id)));
+                        setLastSelectedObjectId(annotations.length > 0 ? annotations[annotations.length - 1].id : null);
+                      }}
+                    >
+                      Select All
+                    </button>
+                    <button onClick={clearObjectBatchSelection} disabled={selectedObjectIds.size === 0}>Clear Selection</button>
+                  </div>
+                  <div className="compact-row">
+                    <button onClick={() => combineSavedObjectMasks(true)} disabled={selectedAcceptedObjectCount < 2}>Combine Selected</button>
+                    <button onClick={deleteSelectedObjects} disabled={selectedObjectIds.size === 0}>Delete Selected</button>
+                  </div>
+                  <p className="hint">Ctrl-click toggles rows. Shift-click selects a range.</p>
+                </div>
+              )}
+              {annotations.length > 0 && (
                 <button
                   className="panel-action"
-                  onClick={combineSavedObjectMasks}
+                  onClick={() => void combineSavedObjectMasks()}
                   disabled={combinableObjectCount < 2}
                   title="Union all accepted saved masks on this image into one object"
                 >
@@ -3101,14 +3552,14 @@ function App() {
                   Combine All Object Masks
                 </button>
               )}
-              {annotations.map((annotation) => (
-                <div key={annotation.id} className={annotation.id === selectedAnnotation ? "object active" : "object"}>
+              {annotations.map((annotation, index) => (
+                <div
+                  key={annotation.id}
+                  className={`${annotation.id === selectedAnnotation ? "object active" : "object"}${selectedObjectIds.has(annotation.id) ? " selected-for-batch" : ""}`}
+                >
                   <button
                     className="object-main"
-                    onClick={() => {
-                      setSelectedAnnotation(annotation.id);
-                      setSelectedCandidate(null);
-                    }}
+                    onClick={(event) => handleObjectRowClick(event, annotation, index)}
                   >
                     <input
                       className="inline-name"
