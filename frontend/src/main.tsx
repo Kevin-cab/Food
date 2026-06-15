@@ -401,14 +401,16 @@ function App() {
       }
       if (key === "r" && !event.ctrlKey && !event.metaKey && !event.altKey) {
         event.preventDefault();
+        setTool("point_pos");
         setPointPromptMode("refine");
-        setStatus("Point mode: refine selected candidate.");
+        setStatus("Positive point tool selected. Point mode: refine selected candidate.");
         return;
       }
       if (key === "t" && !event.ctrlKey && !event.metaKey && !event.altKey) {
         event.preventDefault();
+        setTool("point_pos");
         setPointPromptMode("new_candidate");
-        setStatus("Point mode: new candidate per click.");
+        setStatus("Positive point tool selected. Point mode: new candidate per click.");
         return;
       }
       if (key === "d" && !event.ctrlKey && !event.metaKey && !event.altKey) {
@@ -2227,11 +2229,7 @@ function App() {
       return;
     }
     if ((tool === "brush" || tool === "erase") && (selectedCandidateObj || selectedAnnotation)) {
-      if (selectedCandidateObj) pushCandidateHistory();
-      lastBrushPointRef.current = null;
-      setPainting(true);
-      setEditingTarget(selectedCandidateObj ? "candidate" : "annotation");
-      paintMask(evt);
+      void beginBrushEdit(point);
       return;
     }
     if ((tool === "brush" || tool === "erase") && !selectedCandidateObj && !selectedAnnotation) {
@@ -2314,6 +2312,7 @@ function App() {
       setPainting(false);
       lastBrushPointRef.current = null;
       await saveEditedMask();
+      editingTargetRef.current = null;
       setEditingTarget(null);
       return;
     }
@@ -2437,22 +2436,45 @@ function App() {
   function hydrateMaskCanvas(dataUrl: string) {
     const imageId = currentImage?.id ?? null;
     const maskCanvas = ensureMaskCanvas();
-    if (!maskCanvas) return;
+    if (!maskCanvas) return Promise.resolve();
     const ctx = maskCanvas.getContext("2d");
-    if (!ctx) return;
-    const img = new Image();
-    img.onload = () => {
-      if (activeImageIdRef.current !== imageId) return;
-      ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
-      ctx.drawImage(img, 0, 0, maskCanvas.width, maskCanvas.height);
-    };
-    img.src = dataUrl;
+    if (!ctx) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        if (activeImageIdRef.current === imageId) {
+          ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+          ctx.drawImage(img, 0, 0, maskCanvas.width, maskCanvas.height);
+        }
+        resolve();
+      };
+      img.onerror = () => resolve();
+      img.src = dataUrl;
+    });
+  }
+
+  async function beginBrushEdit(point: Point) {
+    if (!currentImage) return;
+    if (selectedCandidateObj) pushCandidateHistory();
+    const target = selectedCandidateObj ? "candidate" : "annotation";
+    const sourceMask = selectedCandidateObj?.mask_png ?? (selectedAnnotation ? editMaskDataRef.current ?? annotationMasks[selectedAnnotation] : null);
+    if (sourceMask) await hydrateMaskCanvas(sourceMask);
+    lastBrushPointRef.current = null;
+    editingTargetRef.current = target;
+    setEditingTarget(target);
+    setPainting(true);
+    paintMaskAt(point);
   }
 
   function paintMask(evt: React.MouseEvent) {
     const point = canvasPoint(evt);
+    if (!point) return;
+    paintMaskAt(point);
+  }
+
+  function paintMaskAt(point: Point) {
     const maskCanvas = ensureMaskCanvas();
-    if (!point || !maskCanvas) return;
+    if (!maskCanvas) return;
     const ctx = maskCanvas.getContext("2d");
     if (!ctx) return;
     const previous = lastBrushPointRef.current ?? point;
@@ -2480,7 +2502,7 @@ function App() {
     const maskCanvas = ensureMaskCanvas();
     if (!maskCanvas) return;
     const maskPng = maskCanvas.toDataURL("image/png");
-    if (editingTarget === "candidate" && selectedCandidateObj) {
+    if ((editingTargetRef.current === "candidate" || editingTarget === "candidate") && selectedCandidateObj) {
       setCandidates((items) =>
         items.map((candidate) =>
           candidate.localId === selectedCandidateObj.localId ? { ...candidate, mask_png: maskPng } : candidate
