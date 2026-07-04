@@ -159,6 +159,42 @@ class AnnotationService:
                 )
         return {"from_category_name": source, "to_category_name": target, "updated": int(cur.rowcount), "status": status}
 
+    def bulk_delete_for_images(
+        self,
+        project: ProjectDb,
+        image_ids: list[int],
+        status: str = "accepted",
+    ) -> dict[str, object]:
+        unique_image_ids = sorted({int(image_id) for image_id in image_ids})
+        if not unique_image_ids:
+            return {"deleted": 0, "annotation_ids": [], "image_ids": []}
+        placeholders = ",".join("?" for _ in unique_image_ids)
+        params: list[object] = list(unique_image_ids)
+        status_clause = ""
+        if status != "all":
+            status_clause = " AND status=?"
+            params.append(status)
+        with project.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id FROM annotations
+                WHERE image_id IN ({placeholders}){status_clause}
+                ORDER BY id
+                """,
+                params,
+            ).fetchall()
+        annotation_ids = [int(row["id"]) for row in rows]
+        for annotation_id in annotation_ids:
+            self.delete(project, annotation_id)
+        return {"deleted": len(annotation_ids), "annotation_ids": annotation_ids, "image_ids": unique_image_ids}
+
+    def delete_missing_mask_annotations(self, project: ProjectDb) -> dict[str, object]:
+        with project.connect() as conn:
+            rows = conn.execute("SELECT id, mask_path FROM annotations ORDER BY id").fetchall()
+        annotation_ids = [int(row["id"]) for row in rows if not (project.meta_dir / row["mask_path"]).exists()]
+        for annotation_id in annotation_ids:
+            self.delete(project, annotation_id)
+        return {"deleted": len(annotation_ids), "annotation_ids": annotation_ids}
     def delete(self, project: ProjectDb, annotation_id: int) -> None:
         ann = self.get(project, annotation_id)
         mask_paths = [ann.mask_path]

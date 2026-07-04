@@ -15,6 +15,7 @@ from .project_service import ProjectService
 from .qa import validate_project
 from .schemas import (
     AnnotationBulkClassRenameRequest,
+    AnnotationBulkDeleteImagesRequest,
     AnnotationCreateRequest,
     AnnotationUpdateRequest,
     BulkJobCreateRequest,
@@ -174,6 +175,15 @@ def bulk_rename_annotation_class(request: AnnotationBulkClassRenameRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+
+@app.post("/api/annotations/bulk-delete/images")
+def bulk_delete_annotations_for_images(request: AnnotationBulkDeleteImagesRequest):
+    return annotations.bulk_delete_for_images(project_or_400(), request.image_ids, request.status)
+
+
+@app.post("/api/annotations/cleanup/missing-masks")
+def cleanup_missing_mask_annotations():
+    return annotations.delete_missing_mask_annotations(project_or_400())
 
 @app.delete("/api/annotations/{annotation_id}")
 def delete_annotation(annotation_id: int):

@@ -92,6 +92,16 @@ export type AnnotationRecord = {
   visible: boolean;
 };
 
+export type AnnotationBulkDeleteResponse = {
+  deleted: number;
+  annotation_ids: number[];
+  image_ids: number[];
+};
+
+export type AnnotationMissingMaskCleanupResponse = {
+  deleted: number;
+  annotation_ids: number[];
+};
 export type AnnotationBulkClassRenameResponse = {
   from_category_name: string;
   to_category_name: string;

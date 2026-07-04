@@ -1,4 +1,4 @@
-import type { AnnotationBulkClassRenameResponse, AnnotationRecord, BulkJobRecord, BulkMode, ClipStatus, ExportCocoRequest, ExportCocoResponse, ExportWorkspaceResponse, ImageCountOperator, ImageMaskFilter, ImagePage, MaskCandidate, MergeCombinedExportRequest, ProjectIndexStatus, ReviewCandidateRecord, SearchResult } from "./types";
+import type { AnnotationBulkClassRenameResponse, AnnotationBulkDeleteResponse, AnnotationMissingMaskCleanupResponse, AnnotationRecord, BulkJobRecord, BulkMode, ClipStatus, ExportCocoRequest, ExportCocoResponse, ExportWorkspaceResponse, ImageCountOperator, ImageMaskFilter, ImagePage, MaskCandidate, MergeCombinedExportRequest, ProjectIndexStatus, ReviewCandidateRecord, SearchResult } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -81,6 +81,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ from_category_name: fromCategoryName, to_category_name: toCategoryName, status })
     }),
+  bulkDeleteAnnotationsForImages: (imageIds: number[], status = "accepted") =>
+    request<AnnotationBulkDeleteResponse>("/api/annotations/bulk-delete/images", {
+      method: "POST",
+      body: JSON.stringify({ image_ids: imageIds, status })
+    }),
+  cleanupMissingMaskAnnotations: () =>
+    request<AnnotationMissingMaskCleanupResponse>("/api/annotations/cleanup/missing-masks", { method: "POST" }),
   deleteAnnotation: (id: number) =>
     request<{ deleted: number }>(`/api/annotations/${id}`, { method: "DELETE" }),
   replaceMask: (id: number, maskPng: string) =>

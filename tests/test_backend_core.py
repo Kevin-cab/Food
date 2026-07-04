@@ -119,6 +119,42 @@ class BackendCoreTest(unittest.TestCase):
         self.assertEqual(service.get(self.project, accepted.id).category_name, "cat")
         self.assertEqual(service.get(self.project, pending.id).category_name, "dog")
 
+    def test_bulk_delete_for_images_removes_annotations_and_masks(self) -> None:
+        images = self.projects.list_images()
+        service = AnnotationService()
+        mask_a = simple_prompt_mask(images[0].width, images[0].height)
+        mask_b = simple_prompt_mask(images[1].width, images[1].height)
+        ann_a1 = service.create_from_png(self.project, images[0].id, "rice", mask_to_png_data(mask_a))
+        ann_a2 = service.create_from_png(self.project, images[0].id, "rice", mask_to_png_data(mask_a))
+        ann_b = service.create_from_png(self.project, images[1].id, "rice", mask_to_png_data(mask_b))
+        path_a1 = self.project.meta_dir / ann_a1.mask_path
+        path_a2 = self.project.meta_dir / ann_a2.mask_path
+        path_b = self.project.meta_dir / ann_b.mask_path
+
+        result = service.bulk_delete_for_images(self.project, [images[0].id])
+
+        self.assertEqual(result["deleted"], 2)
+        self.assertEqual(result["annotation_ids"], [ann_a1.id, ann_a2.id])
+        self.assertFalse(path_a1.exists())
+        self.assertFalse(path_a2.exists())
+        self.assertTrue(path_b.exists())
+        self.assertEqual([annotation.id for annotation in service.list_for_image(self.project, images[0].id)], [])
+        self.assertEqual([annotation.id for annotation in service.list_for_image(self.project, images[1].id)], [ann_b.id])
+
+    def test_delete_missing_mask_annotations_removes_ghost_objects(self) -> None:
+        images = self.projects.list_images()
+        service = AnnotationService()
+        mask = simple_prompt_mask(images[0].width, images[0].height)
+        missing = service.create_from_png(self.project, images[0].id, "rice", mask_to_png_data(mask))
+        kept = service.create_from_png(self.project, images[1].id, "rice", mask_to_png_data(mask))
+        (self.project.meta_dir / missing.mask_path).unlink()
+
+        result = service.delete_missing_mask_annotations(self.project)
+
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["annotation_ids"], [missing.id])
+        self.assertEqual([annotation.id for annotation in service.list_for_image(self.project, images[0].id)], [])
+        self.assertEqual([annotation.id for annotation in service.list_for_image(self.project, images[1].id)], [kept.id])
     def test_annotation_undo_redo_and_delete_mask_files(self) -> None:
         images = self.projects.list_images()
         service = AnnotationService()
